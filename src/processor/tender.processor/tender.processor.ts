@@ -5,11 +5,9 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ProzorroService } from '../../prozorro/prozorro.service';
 
 @Processor('tender-processor', {
+    // concurrency — скільки задач BullMQ тримає одночасно в пам'яті.
+    // Реальний ліміт запитів до API — в ProzorroService (WORKER_REQUESTS_PER_SECOND)
     concurrency: parseInt(process.env.WORKER_CONCURRENCY || '50', 10),
-    limiter: {
-        max: parseInt(process.env.WORKER_REQUESTS_PER_SECOND || '50', 10),
-        duration: 1000,
-    },
 })
 export class TenderProcessor extends WorkerHost {
     private readonly logger = new Logger(TenderProcessor.name);

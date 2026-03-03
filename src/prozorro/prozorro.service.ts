@@ -8,7 +8,31 @@ export class ProzorroService {
     private readonly logger = new Logger(ProzorroService.name);
     private readonly baseUrl = 'https://public.api.openprocurement.org/api/2.5';
 
-    constructor(private readonly httpService: HttpService) { }
+    constructor(private readonly httpService: HttpService) {
+        // Refill tokens every second (per-instance — no global Redis coordination)
+        setInterval(() => {
+            const toRelease = Math.min(this.maxTokens - this.tokens, this.pendingQueue.length);
+            this.tokens = Math.min(this.maxTokens, this.tokens + this.maxTokens);
+            for (let i = 0; i < toRelease; i++) {
+                this.pendingQueue.shift()!();
+                this.tokens--;
+            }
+        }, 1000);
+    }
+
+    // Per-instance rate limiter (token bucket)
+    private readonly maxTokens = parseInt(process.env.WORKER_REQUESTS_PER_SECOND || '50', 10);
+    private tokens = parseInt(process.env.WORKER_REQUESTS_PER_SECOND || '50', 10);
+    private pendingQueue: Array<() => void> = [];
+
+    private acquireRateLimit(): Promise<void> {
+        if (this.tokens > 0) {
+            this.tokens--;
+            return Promise.resolve();
+        }
+        // No tokens available — wait for the next refill
+        return new Promise<void>(resolve => this.pendingQueue.push(resolve));
+    }
 
     private getRetryConfig() {
         return {
@@ -42,6 +66,9 @@ export class ProzorroService {
 
     async getTenderDetails(tenderId: string): Promise<any> {
         try {
+            // Per-instance rate limit: max WORKER_REQUESTS_PER_SECOND per second on this machine
+            await this.acquireRateLimit();
+
             const url = `${this.baseUrl}/tenders/${tenderId}`;
             this.logger.debug(`Fetching specific tender: ${tenderId}`);
 
