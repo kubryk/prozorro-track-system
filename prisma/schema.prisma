@@ -1,0 +1,48 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Tender {
+  id           String        @id
+  tenderID     String?       // Public ID, e.g., UA-2025-01-01-000107-a
+  status       String?
+  year         Int           // To filter by 2025/2026
+  dateModified DateTime
+  dateCreated  DateTime      @default(now())
+  
+  // Relations
+  participants Participant[]
+}
+
+enum ParticipantRole {
+  CUSTOMER
+  SUPPLIER
+}
+
+model Participant {
+  id        Int             @id @default(autoincrement())
+  edrpou    String
+  name      String?
+  role      ParticipantRole // Customer or Supplier
+  
+  tenderId  String
+  tender    Tender          @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+
+  @@unique([tenderId, edrpou, role]) // A participant can be both Customer and Supplier in one tender
+  @@index([edrpou])
+  @@index([role])
+}
+
+model SyncState {
+  id          Int      @id @default(1)
+  lastOffset  String?
+  updatedAt   DateTime @updatedAt
+}
