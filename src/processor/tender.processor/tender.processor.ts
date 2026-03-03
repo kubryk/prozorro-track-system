@@ -5,9 +5,9 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ProzorroService } from '../../prozorro/prozorro.service';
 
 @Processor('tender-processor', {
-    concurrency: 60, // Process 60 tenders concurrently
+    concurrency: 50, // Process 50 tenders concurrently
     limiter: {
-        max: 60,       // Max 60 requests per 1 second
+        max: 50,       // Max 50 requests per 1 second
         duration: 1000,
     },
 })
