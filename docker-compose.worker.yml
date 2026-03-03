@@ -1,0 +1,6 @@
+services:
+  worker:
+    build: .
+    container_name: prozorro-worker
+    env_file: .env
+    restart: unless-stopped
