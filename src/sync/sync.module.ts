@@ -3,7 +3,6 @@ import { SyncService } from './sync.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ProzorroModule } from '../prozorro/prozorro.module';
 import { BullModule } from '@nestjs/bullmq';
-import { TenderProcessor } from '../processor/tender.processor/tender.processor';
 
 @Module({
   imports: [
@@ -13,6 +12,6 @@ import { TenderProcessor } from '../processor/tender.processor/tender.processor'
       name: 'tender-processor',
     }),
   ],
-  providers: [SyncService, TenderProcessor],
+  providers: [SyncService],
 })
-export class SyncModule {}
+export class SyncModule { }

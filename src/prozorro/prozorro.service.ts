@@ -11,12 +11,8 @@ export class ProzorroService {
   constructor(private readonly httpService: HttpService) {
     // Refill tokens every second (per-instance — no global Redis coordination)
     setInterval(() => {
-      const toRelease = Math.min(
-        this.maxTokens - this.tokens,
-        this.pendingQueue.length,
-      );
-      this.tokens = Math.min(this.maxTokens, this.tokens + this.maxTokens);
-      for (let i = 0; i < toRelease; i++) {
+      this.tokens = this.maxTokens;
+      while (this.tokens > 0 && this.pendingQueue.length > 0) {
         this.pendingQueue.shift()!();
         this.tokens--;
       }

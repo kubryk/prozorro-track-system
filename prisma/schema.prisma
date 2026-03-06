@@ -29,6 +29,11 @@ model Tender {
   contracts        Contract[]
 
   @@index([customerEdrpou])
+  @@index([tenderID])
+  @@index([year])
+  @@index([status])
+  @@index([dateModified])
+  @@index([syncStatus])
 }
 
 model Contract {
@@ -51,6 +56,10 @@ model Contract {
   tender                  Tender        @relation(fields: [tenderId], references: [id], onDelete: Cascade)
 
   @@index([supplierEdrpou])
+  @@index([contractID])
+  @@index([tenderId])
+  @@index([status])
+  @@index([dateModified])
 }
 
 
