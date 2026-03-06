@@ -11,8 +11,8 @@ import { TenderProcessor } from '../processor/tender.processor/tender.processor'
     ProzorroModule,
     BullModule.registerQueue({
       name: 'tender-processor',
-    })
+    }),
   ],
   providers: [SyncService, TenderProcessor],
 })
-export class SyncModule { }
+export class SyncModule {}

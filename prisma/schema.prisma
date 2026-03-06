@@ -13,33 +13,47 @@ datasource db {
 model Tender {
   id           String        @id
   tenderID     String?       // Public ID, e.g., UA-2025-01-01-000107-a
+  title        String?
   status       String?
-  year         Int           // To filter by 2025/2026
-  dateModified DateTime
-  dateCreated  DateTime      @default(now())
+  amount                Float?
+  currency              String?
+  year             Int           // To filter by 2025/2026
+  dateModified     DateTime
+  dateCreated      DateTime      @default(now())
+  syncStatus       String        @default("FULL") // "FULL" or "PARTIAL"
   
+  customerEdrpou   String?
+  customerName     String?
+
   // Relations
-  participants Participant[]
+  contracts        Contract[]
+
+  @@index([customerEdrpou])
 }
 
-enum ParticipantRole {
-  CUSTOMER
-  SUPPLIER
+model Contract {
+  id                      String        @id
+  contractID              String?       // Public ID
+  status                  String?
+  amount                  Float?
+  currency                String?
+  valueAddedTaxIncluded   Boolean?
+  amountNet               Float?
+  dateSigned              DateTime?
+  date                    DateTime?
+  dateModified            DateTime?
+  dateCreated             DateTime?
+
+  supplierEdrpou          String?
+  supplierName            String?
+
+  tenderId                String
+  tender                  Tender        @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+
+  @@index([supplierEdrpou])
 }
 
-model Participant {
-  id        Int             @id @default(autoincrement())
-  edrpou    String
-  name      String?
-  role      ParticipantRole // Customer or Supplier
-  
-  tenderId  String
-  tender    Tender          @relation(fields: [tenderId], references: [id], onDelete: Cascade)
 
-  @@unique([tenderId, edrpou, role]) // A participant can be both Customer and Supplier in one tender
-  @@index([edrpou])
-  @@index([role])
-}
 
 model SyncState {
   id          Int      @id @default(1)

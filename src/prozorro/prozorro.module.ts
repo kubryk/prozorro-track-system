@@ -7,4 +7,4 @@ import { ProzorroService } from './prozorro.service';
   providers: [ProzorroService],
   exports: [ProzorroService],
 })
-export class ProzorroModule { }
+export class ProzorroModule {}

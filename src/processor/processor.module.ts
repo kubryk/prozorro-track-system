@@ -10,9 +10,9 @@ import { TenderProcessor } from './tender.processor/tender.processor';
     ProzorroModule,
     BullModule.registerQueue({
       name: 'tender-processor',
-    })
+    }),
   ],
   providers: [TenderProcessor],
   exports: [TenderProcessor],
 })
-export class ProcessorModule { }
+export class ProcessorModule {}
