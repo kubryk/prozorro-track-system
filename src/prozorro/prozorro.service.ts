@@ -55,7 +55,7 @@ export class ProzorroService {
       const url = offset
         ? `${this.baseUrl}/tenders?offset=${offset}`
         : `${this.baseUrl}/tenders`;
-      this.logger.debug(`Fetching tenders from: ${url}`);
+
 
       const response = await firstValueFrom(
         this.httpService.get(url).pipe(retry(this.getRetryConfig())),
@@ -81,7 +81,7 @@ export class ProzorroService {
       await this.acquireRateLimit();
 
       const url = `${this.baseUrl}/tenders/${tenderId}`;
-      this.logger.debug(`Fetching specific tender: ${tenderId}`);
+
 
       const response = await firstValueFrom(
         this.httpService.get(url).pipe(retry(this.getRetryConfig())),
@@ -101,7 +101,7 @@ export class ProzorroService {
       await this.acquireRateLimit();
 
       const url = `${this.baseUrl}/contracts/${contractId}`;
-      this.logger.debug(`Fetching contract: ${contractId}`);
+
 
       const response = await firstValueFrom(
         this.httpService.get(url).pipe(retry(this.getRetryConfig())),

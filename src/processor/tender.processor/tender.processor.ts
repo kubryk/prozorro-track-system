@@ -4,6 +4,8 @@ import { Logger } from '@nestjs/common';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProzorroService } from '../../prozorro/prozorro.service';
 
+const STATS_INTERVAL_MS = 30_000; // Print summary every 30 seconds
+
 @Processor('tender-processor', {
   // concurrency — скільки задач BullMQ тримає одночасно в пам'яті.
   // Реальний ліміт запитів до API — в ProzorroService (WORKER_REQUESTS_PER_SECOND)
@@ -12,19 +14,39 @@ import { ProzorroService } from '../../prozorro/prozorro.service';
 export class TenderProcessor extends WorkerHost {
   private readonly logger = new Logger(TenderProcessor.name);
 
+  // Aggregate counters for periodic summary
+  private processedTenders = 0;
+  private processedContracts = 0;
+  private errorCount = 0;
+  private partialCount = 0;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly prozorroApi: ProzorroService,
   ) {
     super();
+
+    // Print stats summary every 30 seconds
+    setInterval(() => {
+      if (this.processedTenders === 0 && this.errorCount === 0) return; // nothing to report
+
+      const speed = (this.processedTenders / (STATS_INTERVAL_MS / 1000)).toFixed(1);
+      this.logger.log(
+        `📊 За ${STATS_INTERVAL_MS / 1000}с: оброблено ${this.processedTenders} тендерів (${speed}/с), ${this.processedContracts} контрактів | помилки: ${this.errorCount}, partial: ${this.partialCount}`,
+      );
+
+      // Reset counters
+      this.processedTenders = 0;
+      this.processedContracts = 0;
+      this.errorCount = 0;
+      this.partialCount = 0;
+    }, STATS_INTERVAL_MS);
   }
 
   async process(job: Job<{ tenderId: string }, any, string>): Promise<any> {
     const { tenderId } = job.data;
 
     try {
-      this.logger.log(`Processing tender: ${tenderId}`);
-
       const tenderDetails = await this.prozorroApi.getTenderDetails(tenderId);
 
       if (!tenderDetails) {
@@ -187,15 +209,17 @@ export class TenderProcessor extends WorkerHost {
 
       // Update Tender status if there were failures
       if (hasFailedContracts) {
+        this.partialCount++;
         await this.prisma.tender.update({
           where: { id: tenderDetails.id },
           data: { syncStatus: 'PARTIAL' },
         });
       }
 
-      this.logger.log(
-        `Processed tender ${tenderId} (${tenderYear}): Customer EDRPOU: ${customerEdrpou},  Suppliers available: ${suppliers.size}, ${contractsCount} contracts saved.`,
-      );
+      // Update aggregate counters (no per-tender log)
+      this.processedTenders++;
+      this.processedContracts += contractsCount;
+
       return {
         success: true,
         customers: customerEdrpou ? 1 : 0,
@@ -203,6 +227,7 @@ export class TenderProcessor extends WorkerHost {
         contracts: contractsCount,
       };
     } catch (error) {
+      this.errorCount++;
       this.logger.error(
         `Failed to process tender ${tenderId}: ${error.message}`,
         error.stack,

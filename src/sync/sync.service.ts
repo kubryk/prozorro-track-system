@@ -9,16 +9,29 @@ import { ProzorroService } from '../prozorro/prozorro.service';
 export class SyncService implements OnApplicationBootstrap {
   private readonly logger = new Logger(SyncService.name);
   private isSyncing = false;
+  private addedCount = 0;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly prozorroApi: ProzorroService,
     @InjectQueue('tender-processor') private readonly tenderQueue: Queue,
-  ) { }
+  ) {
+    // Print sync stats every 30 seconds
+    setInterval(async () => {
+      if (process.env.APP_ROLE === 'WORKER') return;
+      try {
+        const counts = await this.tenderQueue.getJobCounts();
+        if (this.addedCount === 0 && counts.waiting === 0) return;
+        this.logger.log(
+          `📥 За 30с: додано ${this.addedCount} тендерів у чергу | Черга: ${counts.waiting} очікують, ${counts.active} активних, ${counts.failed} помилок`,
+        );
+        this.addedCount = 0;
+      } catch { /* ignore */ }
+    }, 30_000);
+  }
 
   async onApplicationBootstrap() {
     this.logger.log('SyncService initialized, checking initial offset...');
-    // Example: You can set an initial offset here if the DB is empty
   }
 
   @Cron('* * * * * *') // Run every 1 second
@@ -55,13 +68,8 @@ export class SyncService implements OnApplicationBootstrap {
         );
 
         if (!data || data.length === 0) {
-          this.logger.log('No more new tenders found in this cycle.');
           break;
         }
-
-        this.logger.log(
-          `Page ${pagesProcessed + 1}: Found ${data.length} tenders, offset: ${currentOffset || 'START'}`,
-        );
 
         // 3. Add valid tenders to queue with retries
         for (const tender of data) {
@@ -81,6 +89,8 @@ export class SyncService implements OnApplicationBootstrap {
           );
         }
 
+        this.addedCount += data.length;
+
         // 4. Update local tracker and Database offset
         currentOffset = nextPageOffset;
         if (currentOffset) {
@@ -95,10 +105,6 @@ export class SyncService implements OnApplicationBootstrap {
         // If the page was not full, we've likely caught up to real-time
         if (data.length < 100) break;
       }
-
-      this.logger.log(
-        `Sync cycle finished. Processed ${pagesProcessed} pages.`,
-      );
     } catch (error) {
       this.logger.error('Error during synchronization loop', error.stack);
     } finally {
