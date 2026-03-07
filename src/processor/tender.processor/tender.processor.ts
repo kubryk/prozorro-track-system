@@ -6,6 +6,13 @@ import { ProzorroService } from '../../prozorro/prozorro.service';
 
 const STATS_INTERVAL_MS = 30_000; // Print summary every 30 seconds
 
+/** Safely parse a value to Float — Prozorro API sometimes returns numbers as strings */
+function toFloat(val: any): number | null {
+  if (val == null) return null;
+  const n = typeof val === 'string' ? parseFloat(val) : val;
+  return isNaN(n) ? null : n;
+}
+
 @Processor('tender-processor', {
   // concurrency — скільки задач BullMQ тримає одночасно в пам'яті.
   // Реальний ліміт запитів до API — в ProzorroService (WORKER_REQUESTS_PER_SECOND)
@@ -95,7 +102,7 @@ export class TenderProcessor extends WorkerHost {
           tenderID: tenderDetails.tenderID,
           title: tenderDetails.title || null,
           status: tenderDetails.status,
-          amount: tenderDetails.value?.amount || null,
+          amount: toFloat(tenderDetails.value?.amount),
           currency: tenderDetails.value?.currency || null,
           year: tenderYear,
           dateModified: new Date(tenderDetails.dateModified),
@@ -131,13 +138,13 @@ export class TenderProcessor extends WorkerHost {
 
             // Support both new format (contract.value.amount) and old format (contract.amount)
             const value = contract.value || {};
-            const amount = value.amount ?? contract.amount ?? null;
+            const amount = toFloat(value.amount ?? contract.amount);
             const currency = value.currency || contract.currency || null;
             const vatIncluded =
               value.valueAddedTaxIncluded ??
               contract.valueAddedTaxIncluded ??
               null;
-            const amountNet = value.amountNet ?? contract.amountNet ?? null;
+            const amountNet = toFloat(value.amountNet ?? contract.amountNet);
 
             // Extract Supplier for this contract
             let supplierEdrpou: string | null = null;
