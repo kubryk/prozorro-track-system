@@ -20,6 +20,15 @@ model Tender {
   year             Int           // To filter by 2025/2026
   dateModified     DateTime
   dateCreated      DateTime      @default(now())
+  
+  // Official Prozorro periods
+  tenderPeriodStart    DateTime?
+  tenderPeriodEnd      DateTime?
+  enquiryPeriodStart   DateTime?
+  enquiryPeriodEnd     DateTime?
+  auctionPeriodStart   DateTime?
+  awardPeriodStart     DateTime?
+
   syncStatus       String        @default("FULL") // "FULL" or "PARTIAL"
   
   customerEdrpou   String?
@@ -34,6 +43,12 @@ model Tender {
   @@index([status])
   @@index([dateModified])
   @@index([syncStatus])
+  @@index([tenderPeriodStart])
+  @@index([tenderPeriodEnd])
+  @@index([enquiryPeriodStart])
+  @@index([enquiryPeriodEnd])
+  @@index([auctionPeriodStart])
+  @@index([awardPeriodStart])
 }
 
 model Contract {
@@ -60,6 +75,7 @@ model Contract {
   @@index([tenderId])
   @@index([status])
   @@index([dateModified])
+  @@index([dateSigned])
 }
 
 

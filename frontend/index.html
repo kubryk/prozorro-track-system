@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="uk">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prozorro Search | Premium Tracker</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="index.css">
+</head>
+
+<body>
+    <div class="background-blobs">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <main class="app-container">
+        <header class="header">
+            <div class="header-logo">
+                <h1>Prozorro <span>Track</span></h1>
+            </div>
+            <div id="stats-bar" class="stats-bar">
+                <div class="stat-item">
+                    <span id="stat-tenders" class="stat-value">...</span>
+                    <span class="stat-label">Тендерів</span>
+                </div>
+                <div class="stat-divider"></div>
+                <div class="stat-item">
+                    <span id="stat-contracts" class="stat-value">...</span>
+                    <span class="stat-label">Контрактів</span>
+                </div>
+                <div class="stat-divider"></div>
+                <div class="stat-meta">
+                    <div class="meta-row">
+                        <span class="meta-label">Архів з:</span>
+                        <span class="meta-value">01.01.2025</span>
+                    </div>
+                    <div class="meta-row update-row">
+                        <!-- <span class="meta-label">Оновлено:</span> -->
+                        <span id="last-sync" class="meta-value">...</span>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <section class="search-section card glass">
+            <div class="search-type-toggle">
+                <button id="toggle-tenders" class="toggle-btn active" data-type="tenders">Тендери</button>
+                <button id="toggle-contracts" class="toggle-btn" data-type="contracts">Контракти</button>
+            </div>
+
+            <div class="search-inputs">
+                <div class="input-group">
+                    <label for="edrpou">ЄДРПОУ</label>
+                    <input type="text" id="edrpou" placeholder="8 цифр..." maxlength="8">
+                </div>
+
+                <div class="input-group">
+                    <label for="role">Роль</label>
+                    <select id="role">
+                        <option value="customer">Замовник</option>
+                        <option value="supplier">Постачальник</option>
+                    </select>
+                </div>
+
+                <div class="input-group">
+                    <label for="status">Статус</label>
+                    <select id="status">
+                        <option value="">Всі статуси</option>
+                        <option value="active">Активні</option>
+                        <option value="complete">Завершені</option>
+                        <option value="unsuccessful">Неуспішні</option>
+                        <option value="terminated">Розірвані (контр.)</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="search-inputs secondary">
+                <div class="input-group">
+                    <label for="dateType">Тип дати</label>
+                    <select id="dateType">
+                        <option value="dateModified">Оновлено</option>
+                        <option value="dateCreated">Створено</option>
+                        <option value="tenderPeriodStart">Прийом пропозицій</option>
+                        <option value="enquiryPeriodStart">Період уточнень</option>
+                        <option value="auctionPeriodStart">Аукціон</option>
+                        <option value="awardPeriodStart">Кваліфікація</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label for="dateFrom">Від дати</label>
+                    <input type="date" id="dateFrom">
+                </div>
+                <div class="input-group">
+                    <label for="dateTo">До дати</label>
+                    <input type="date" id="dateTo">
+                </div>
+                <div class="input-group">
+                    <label for="priceFrom">Ціна від</label>
+                    <input type="number" id="priceFrom" placeholder="Мін.">
+                </div>
+                <div class="input-group">
+                    <label for="priceTo">Ціна до</label>
+                    <input type="number" id="priceTo" placeholder="Макс.">
+                </div>
+                <button id="search-btn" class="btn btn-primary">Пошук</button>
+            </div>
+        </section>
+
+        <section class="results-info">
+            <h2 id="results-count">Знайдено: 0</h2>
+            <div id="loading" class="loader hidden"></div>
+        </section>
+
+        <section id="results-grid" class="results-grid">
+            <!-- Cards will be injected here -->
+            <div class="empty-state">
+                <p>Введіть ЄДРПОУ для початку пошуку</p>
+            </div>
+        </section>
+
+        <footer class="pagination hidden" id="pagination">
+            <button id="prev-btn" class="btn btn-secondary">Назад</button>
+            <span id="page-info">Сторінка 1</span>
+            <button id="next-btn" class="btn btn-secondary">Вперед</button>
+        </footer>
+    </main>
+
+    <script type="module" src="main.js"></script>
+</body>
+
+</html>

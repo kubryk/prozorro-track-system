@@ -1,4 +1,5 @@
 node_modules
+frontend/node_modules
 # Keep environment variables out of version control
 .env
 
@@ -7,3 +8,15 @@ dist
 logs
 *.log
 npm-debug.log*
+
+# Backups
+*.sql
+*.sql.gz
+
+# Temporary scripts
+*_queue.js
+direct_backfill.js
+
+# OS specific files
+.DS_Store
+**/.DS_Store

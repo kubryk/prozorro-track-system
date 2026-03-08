@@ -157,4 +157,46 @@ export class SyncService implements OnApplicationBootstrap {
       this.logger.error('Error in retryPartialTenders cron', error.stack);
     }
   }
+
+  async backfillTenders() {
+    this.logger.log('🚀 Starting backfill for tenders missing advanced dates...');
+    try {
+      // Find tenders where new date fields are missing
+      const tendersToBackfill = await this.prisma.tender.findMany({
+        where: {
+          tenderPeriodStart: null,
+        } as any,
+        select: {
+          id: true,
+          dateModified: true,
+        },
+      });
+
+      if (tendersToBackfill.length === 0) {
+        this.logger.log('✅ No tenders found missing advanced dates. Backfill not needed.');
+        return { count: 0 };
+      }
+
+      this.logger.log(`📥 Found ${tendersToBackfill.length} tenders to backfill. Adding to queue...`);
+
+      for (const tender of tendersToBackfill) {
+        await this.tenderQueue.add(
+          'process-tender',
+          { tenderId: tender.id, dateModified: tender.dateModified },
+          {
+            jobId: `backfill-${tender.id}`, // Unique ID for backfill to avoid conflict with normal sync
+            attempts: 5,
+            backoff: { type: 'exponential', delay: 5000 },
+            removeOnComplete: true,
+          },
+        );
+      }
+
+      this.logger.log('✅ All backfill jobs added to queue.');
+      return { count: tendersToBackfill.length };
+    } catch (error) {
+      this.logger.error('❌ Error during backfill operation', error.stack);
+      throw error;
+    }
+  }
 }

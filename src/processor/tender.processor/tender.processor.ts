@@ -95,6 +95,9 @@ export class TenderProcessor extends WorkerHost {
           null;
       }
 
+      // Helper to parse Prozorro dates
+      const pDate = (d: any) => d ? new Date(d) : null;
+
       // Save Tender to database
       await this.prisma.tender.upsert({
         where: { id: tenderDetails.id },
@@ -106,6 +109,12 @@ export class TenderProcessor extends WorkerHost {
           currency: tenderDetails.value?.currency || null,
           year: tenderYear,
           dateModified: new Date(tenderDetails.dateModified),
+          tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
+          tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
+          enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
+          enquiryPeriodEnd: pDate(tenderDetails.enquiryPeriod?.endDate),
+          auctionPeriodStart: pDate(tenderDetails.auctionPeriod?.startDate),
+          awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
           customerEdrpou,
           customerName,
         },
@@ -118,6 +127,12 @@ export class TenderProcessor extends WorkerHost {
           currency: tenderDetails.value?.currency || null,
           year: tenderYear,
           dateModified: new Date(tenderDetails.dateModified),
+          tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
+          tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
+          enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
+          enquiryPeriodEnd: pDate(tenderDetails.enquiryPeriod?.endDate),
+          auctionPeriodStart: pDate(tenderDetails.auctionPeriod?.startDate),
+          awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
           customerEdrpou,
           customerName,
         },
