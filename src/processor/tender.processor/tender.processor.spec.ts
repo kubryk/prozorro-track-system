@@ -4,6 +4,7 @@ import { TenderProcessor } from './tender.processor';
 describe('TenderProcessor', () => {
   let processor: TenderProcessor;
   let prisma: {
+    $transaction: jest.Mock;
     tender: { upsert: jest.Mock };
     contract: { upsert: jest.Mock; deleteMany: jest.Mock };
   };
@@ -19,6 +20,7 @@ describe('TenderProcessor', () => {
     jest.spyOn(Logger.prototype, 'error').mockImplementation();
 
     prisma = {
+      $transaction: jest.fn(),
       tender: {
         upsert: jest.fn().mockResolvedValue(undefined),
       },
@@ -27,6 +29,12 @@ describe('TenderProcessor', () => {
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
     };
+    prisma.$transaction.mockImplementation(async (callback: any) =>
+      callback({
+        tender: prisma.tender,
+        contract: prisma.contract,
+      }),
+    );
 
     prozorroApi = {
       getTenderDetails: jest.fn(),
@@ -38,6 +46,77 @@ describe('TenderProcessor', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+    delete process.env.WORKER_DB_CONCURRENCY;
+  });
+
+  it('обмежує одночасні DB write-транзакції, щоб не вибивати Prisma pool', async () => {
+    process.env.WORKER_DB_CONCURRENCY = '1';
+
+    let activeTransactions = 0;
+    let maxActiveTransactions = 0;
+    let transactionCall = 0;
+    let releaseFirstTransaction!: () => void;
+    const firstTransactionGate = new Promise<void>((resolve) => {
+      releaseFirstTransaction = resolve;
+    });
+
+    prisma.$transaction.mockImplementation(async (callback: any) => {
+      transactionCall++;
+      activeTransactions++;
+      maxActiveTransactions = Math.max(maxActiveTransactions, activeTransactions);
+
+      if (transactionCall === 1) {
+        await firstTransactionGate;
+      }
+
+      try {
+        return await callback({
+          tender: prisma.tender,
+          contract: prisma.contract,
+        });
+      } finally {
+        activeTransactions--;
+      }
+    });
+
+    prozorroApi.getTenderDetails
+      .mockResolvedValueOnce({
+        id: 'tender-db-1',
+        tenderID: 'UA-2026-01-01-000011-a',
+        title: 'Tender DB 1',
+        status: 'active.tendering',
+        value: { amount: '1000', currency: 'UAH' },
+        dateModified: '2026-01-01T00:00:00.000Z',
+        contracts: [],
+      })
+      .mockResolvedValueOnce({
+        id: 'tender-db-2',
+        tenderID: 'UA-2026-01-01-000012-a',
+        title: 'Tender DB 2',
+        status: 'active.tendering',
+        value: { amount: '2000', currency: 'UAH' },
+        dateModified: '2026-01-02T00:00:00.000Z',
+        contracts: [],
+      });
+
+    processor = new TenderProcessor(prisma as any, prozorroApi as any);
+
+    const firstProcess = processor.process({
+      data: { tenderId: 'tender-db-1' },
+    } as any);
+    await Promise.resolve();
+
+    const secondProcess = processor.process({
+      data: { tenderId: 'tender-db-2' },
+    } as any);
+    await Promise.resolve();
+
+    expect(maxActiveTransactions).toBe(1);
+
+    releaseFirstTransaction();
+    await Promise.all([firstProcess, secondProcess]);
+
+    expect(maxActiveTransactions).toBe(1);
   });
 
   it('зберігає upstream dateCreated для тендера під час upsert', async () => {

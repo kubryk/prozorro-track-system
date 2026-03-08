@@ -21,6 +21,20 @@ function toFloat(val: any): number | null {
 })
 export class TenderProcessor extends WorkerHost {
   private readonly logger = new Logger(TenderProcessor.name);
+  private readonly maxDbWriteConcurrency = (() => {
+    const parsed = Number.parseInt(
+      process.env.WORKER_DB_CONCURRENCY || '2',
+      10,
+    );
+
+    if (Number.isNaN(parsed) || parsed < 1) {
+      return 2;
+    }
+
+    return parsed;
+  })();
+  private activeDbWriteSlots = 0;
+  private readonly pendingDbWriteWaiters: Array<() => void> = [];
 
   // Aggregate counters for periodic summary
   private processedTenders = 0;
@@ -49,6 +63,35 @@ export class TenderProcessor extends WorkerHost {
       this.errorCount = 0;
       this.partialCount = 0;
     }, STATS_INTERVAL_MS);
+  }
+
+  private async acquireDbWriteSlot(): Promise<void> {
+    if (this.activeDbWriteSlots < this.maxDbWriteConcurrency) {
+      this.activeDbWriteSlots++;
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      this.pendingDbWriteWaiters.push(resolve);
+    });
+    this.activeDbWriteSlots++;
+  }
+
+  private releaseDbWriteSlot(): void {
+    this.activeDbWriteSlots--;
+    const nextWaiter = this.pendingDbWriteWaiters.shift();
+    if (nextWaiter) {
+      nextWaiter();
+    }
+  }
+
+  private async withDbWriteSlot<T>(work: () => Promise<T>): Promise<T> {
+    await this.acquireDbWriteSlot();
+    try {
+      return await work();
+    } finally {
+      this.releaseDbWriteSlot();
+    }
   }
 
   async process(
@@ -107,50 +150,6 @@ export class TenderProcessor extends WorkerHost {
       const tenderDateCreated = pDate(tenderDetails.dateCreated) ?? tenderDateModified;
       const tenderYear = tenderDateModified.getFullYear();
 
-      // Save Tender to database
-      await this.prisma.tender.upsert({
-        where: { id: tenderDetails.id },
-        update: {
-          tenderID: tenderDetails.tenderID,
-          title: tenderDetails.title || null,
-          status: tenderDetails.status,
-          amount: toFloat(tenderDetails.value?.amount),
-          currency: tenderDetails.value?.currency || null,
-          year: tenderYear,
-          dateModified: tenderDateModified,
-          dateCreated: tenderDateCreated,
-          tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
-          tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
-          enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
-          enquiryPeriodEnd: pDate(tenderDetails.enquiryPeriod?.endDate),
-          auctionPeriodStart: pDate(tenderDetails.auctionPeriod?.startDate),
-          awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
-          customerEdrpou,
-          customerName,
-          syncStatus: 'FULL',
-        },
-        create: {
-          id: tenderDetails.id,
-          tenderID: tenderDetails.tenderID,
-          title: tenderDetails.title || null,
-          status: tenderDetails.status,
-          amount: toFloat(tenderDetails.value?.amount),
-          currency: tenderDetails.value?.currency || null,
-          year: tenderYear,
-          dateModified: tenderDateModified,
-          dateCreated: tenderDateCreated,
-          tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
-          tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
-          enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
-          enquiryPeriodEnd: pDate(tenderDetails.enquiryPeriod?.endDate),
-          auctionPeriodStart: pDate(tenderDetails.auctionPeriod?.startDate),
-          awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
-          customerEdrpou,
-          customerName,
-          syncStatus: 'FULL',
-        },
-      });
-
       const contractRefs = Array.isArray(tenderDetails.contracts)
         ? tenderDetails.contracts
         : null;
@@ -169,6 +168,7 @@ export class TenderProcessor extends WorkerHost {
       // Save Contracts (with separate API call for full details)
       let contractsCount = 0;
       let hasFailedContracts = false;
+      const contractDetailsToPersist: any[] = [];
       if (contractRefs) {
         for (const contractRef of contractRefs) {
           try {
@@ -179,6 +179,64 @@ export class TenderProcessor extends WorkerHost {
             );
             if (!contract) continue;
 
+            contractDetailsToPersist.push(contract);
+          } catch (contractError) {
+            // Don't fail the entire tender if one contract has issues
+            hasFailedContracts = true;
+            this.logger.warn(
+              `Skipping contract ${contractRef.id} for tender ${tenderId}: ${contractError.message}`,
+            );
+          }
+        }
+      }
+      contractsCount = contractDetailsToPersist.length;
+
+      const deletedContracts = await this.withDbWriteSlot(() =>
+        this.prisma.$transaction(async (tx) => {
+          await tx.tender.upsert({
+            where: { id: tenderDetails.id },
+            update: {
+              tenderID: tenderDetails.tenderID,
+              title: tenderDetails.title || null,
+              status: tenderDetails.status,
+              amount: toFloat(tenderDetails.value?.amount),
+              currency: tenderDetails.value?.currency || null,
+              year: tenderYear,
+              dateModified: tenderDateModified,
+              dateCreated: tenderDateCreated,
+              tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
+              tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
+              enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
+              enquiryPeriodEnd: pDate(tenderDetails.enquiryPeriod?.endDate),
+              auctionPeriodStart: pDate(tenderDetails.auctionPeriod?.startDate),
+              awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
+              customerEdrpou,
+              customerName,
+              syncStatus: 'FULL',
+            },
+            create: {
+              id: tenderDetails.id,
+              tenderID: tenderDetails.tenderID,
+              title: tenderDetails.title || null,
+              status: tenderDetails.status,
+              amount: toFloat(tenderDetails.value?.amount),
+              currency: tenderDetails.value?.currency || null,
+              year: tenderYear,
+              dateModified: tenderDateModified,
+              dateCreated: tenderDateCreated,
+              tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
+              tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
+              enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
+              enquiryPeriodEnd: pDate(tenderDetails.enquiryPeriod?.endDate),
+              auctionPeriodStart: pDate(tenderDetails.auctionPeriod?.startDate),
+              awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
+              customerEdrpou,
+              customerName,
+              syncStatus: 'FULL',
+            },
+          });
+
+          for (const contract of contractDetailsToPersist) {
             // Support both new format (contract.value.amount) and old format (contract.amount)
             const value = contract.value || {};
             const amount = toFloat(value.amount ?? contract.amount);
@@ -193,13 +251,17 @@ export class TenderProcessor extends WorkerHost {
             let supplierEdrpou: string | null = null;
             let supplierName: string | null = null;
 
-            if (contract.suppliers && Array.isArray(contract.suppliers) && contract.suppliers.length > 0) {
+            if (
+              contract.suppliers &&
+              Array.isArray(contract.suppliers) &&
+              contract.suppliers.length > 0
+            ) {
               const supplier = contract.suppliers[0];
               supplierEdrpou = supplier.identifier?.id || null;
               supplierName = supplier.name || supplier.identifier?.legalName || null;
             }
 
-            await this.prisma.contract.upsert({
+            await tx.contract.upsert({
               where: { id: contract.id },
               update: {
                 contractID: contract.contractID || null,
@@ -245,43 +307,36 @@ export class TenderProcessor extends WorkerHost {
                 tenderId: tenderDetails.id,
               },
             });
-
-            contractsCount++; // Only count successfully saved contracts
-          } catch (contractError) {
-            // Don't fail the entire tender if one contract has issues
-            hasFailedContracts = true;
-            this.logger.warn(
-              `Skipping contract ${contractRef.id} for tender ${tenderId}: ${contractError.message}`,
-            );
           }
-        }
 
-        const deleteWhere: Prisma.ContractWhereInput =
-          expectedContractIds.length > 0
-            ? {
-                tenderId: tenderDetails.id,
-                id: { notIn: expectedContractIds },
-              }
-            : { tenderId: tenderDetails.id };
+          const deleteWhere: Prisma.ContractWhereInput =
+            expectedContractIds.length > 0
+              ? {
+                  tenderId: tenderDetails.id,
+                  id: { notIn: expectedContractIds },
+                }
+              : { tenderId: tenderDetails.id };
 
-        const { count: deletedContracts } = await this.prisma.contract.deleteMany({
-          where: deleteWhere,
-        });
+          const { count: deletedContractsCount } = await tx.contract.deleteMany({
+            where: deleteWhere,
+          });
 
-        if (deletedContracts > 0) {
-          this.logger.log(
-            `Removed ${deletedContracts} stale contracts for tender ${tenderId}`,
-          );
-        }
-      }
+          if (hasFailedContracts) {
+            this.partialCount++;
+            await tx.tender.update({
+              where: { id: tenderDetails.id },
+              data: { syncStatus: 'PARTIAL' },
+            });
+          }
 
-      // Update Tender status if there were failures
-      if (hasFailedContracts) {
-        this.partialCount++;
-        await this.prisma.tender.update({
-          where: { id: tenderDetails.id },
-          data: { syncStatus: 'PARTIAL' },
-        });
+          return deletedContractsCount;
+        }),
+      );
+
+      if (deletedContracts > 0) {
+        this.logger.log(
+          `Removed ${deletedContracts} stale contracts for tender ${tenderId}`,
+        );
       }
 
       // Update aggregate counters (no per-tender log)
@@ -303,20 +358,22 @@ export class TenderProcessor extends WorkerHost {
         ? new Date()
         : fallbackDateModified;
 
-      await this.prisma.tender.upsert({
-        where: { id: tenderId },
-        update: {
-          year: safeDateModified.getFullYear(),
-          dateModified: safeDateModified,
-          syncStatus: 'FAILED',
-        },
-        create: {
-          id: tenderId,
-          year: safeDateModified.getFullYear(),
-          dateModified: safeDateModified,
-          syncStatus: 'FAILED',
-        },
-      });
+      await this.withDbWriteSlot(() =>
+        this.prisma.tender.upsert({
+          where: { id: tenderId },
+          update: {
+            year: safeDateModified.getFullYear(),
+            dateModified: safeDateModified,
+            syncStatus: 'FAILED',
+          },
+          create: {
+            id: tenderId,
+            year: safeDateModified.getFullYear(),
+            dateModified: safeDateModified,
+            syncStatus: 'FAILED',
+          },
+        }),
+      );
       this.logger.error(
         `Failed to process tender ${tenderId}: ${error.message}`,
         error.stack,
