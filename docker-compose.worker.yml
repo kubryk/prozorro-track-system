@@ -3,4 +3,6 @@ services:
     build: .
     container_name: prozorro-worker
     env_file: .env
+    environment:
+      APP_ROLE: WORKER
     restart: unless-stopped

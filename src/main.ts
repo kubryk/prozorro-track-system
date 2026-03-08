@@ -14,7 +14,13 @@ async function bootstrap() {
     allowedHeaders: 'Content-Type, Accept, X-API-KEY',
   });
 
-  app.useGlobalPipes(new ValidationPipe()); // Added global ValidationPipe
+  app.useGlobalPipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+    }),
+  );
 
   const config = new DocumentBuilder()
     .setTitle('Prozorro Track System API')

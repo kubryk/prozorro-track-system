@@ -19,7 +19,7 @@ model Tender {
   currency              String?
   year             Int           // To filter by 2025/2026
   dateModified     DateTime
-  dateCreated      DateTime      @default(now())
+  dateCreated      DateTime?
   
   // Official Prozorro periods
   tenderPeriodStart    DateTime?

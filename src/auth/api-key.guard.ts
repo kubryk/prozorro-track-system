@@ -10,6 +10,9 @@ export class ApiKeyGuard implements CanActivate {
     ): boolean | Promise<boolean> | Observable<boolean> {
         const request = context.switchToHttp().getRequest();
         const apiKey = request.headers['x-api-key'];
+        const hasApiKey = Array.isArray(apiKey)
+            ? apiKey.length > 0
+            : typeof apiKey === 'string' && apiKey.length > 0;
 
         const validApiKey = process.env.API_KEY;
 
@@ -22,7 +25,9 @@ export class ApiKeyGuard implements CanActivate {
             return true;
         }
 
-        this.logger.warn(`Failed authentication attempt with API Key: ${apiKey}`);
+        this.logger.warn(
+            `Failed authentication attempt for ${request.method} ${request.originalUrl || request.url}; api key provided: ${hasApiKey}`,
+        );
         throw new UnauthorizedException('API Key is missing or invalid');
     }
 }

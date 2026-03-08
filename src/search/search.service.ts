@@ -1,12 +1,57 @@
 import { Injectable } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 
 export type EdrpouRole = 'customer' | 'supplier';
 
+const DATE_ONLY_QUERY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+function parseDateQueryBoundary(
+    value: string,
+    boundary: 'start' | 'end',
+): Date {
+    if (DATE_ONLY_QUERY_PATTERN.test(value)) {
+        const [year, month, day] = value.split('-').map(Number);
+
+        if (boundary === 'end') {
+            return new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
+        }
+
+        return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    }
+
+    return new Date(value);
+}
+
+function buildDateTimeFilter(
+    dateFrom?: string,
+    dateTo?: string,
+): Prisma.DateTimeFilter | undefined {
+    if (!dateFrom && !dateTo) {
+        return undefined;
+    }
+
+    const filter: Prisma.DateTimeFilter = {};
+
+    if (dateFrom) {
+        filter.gte = parseDateQueryBoundary(dateFrom, 'start');
+    }
+
+    if (dateTo) {
+        filter.lte = parseDateQueryBoundary(dateTo, 'end');
+    }
+
+    return filter;
+}
+
 @Injectable()
 export class SearchService {
-    constructor(private readonly prisma: PrismaService) { }
+    constructor(
+        private readonly prisma: PrismaService,
+        @InjectQueue('tender-processor') private readonly tenderQueue: Queue,
+    ) { }
 
     /**
      * Universal tender search with filters:
@@ -62,14 +107,9 @@ export class SearchService {
                                 dateType === 'awardPeriodStart' ? 'awardPeriodStart' :
                                     'dateModified';
 
-        if (params.dateFrom || params.dateTo) {
-            where[dateField] = {};
-            if (params.dateFrom) {
-                where[dateField].gte = new Date(params.dateFrom);
-            }
-            if (params.dateTo) {
-                where[dateField].lte = new Date(params.dateTo);
-            }
+        const tenderDateFilter = buildDateTimeFilter(params.dateFrom, params.dateTo);
+        if (tenderDateFilter) {
+            where[dateField] = tenderDateFilter;
         }
 
         // Price range filter
@@ -153,14 +193,9 @@ export class SearchService {
         const dateType = params.dateType || 'dateSigned';
         const dateField = dateType === 'dateModified' ? 'dateModified' : 'dateSigned';
 
-        if (params.dateFrom || params.dateTo) {
-            where[dateField] = {};
-            if (params.dateFrom) {
-                where[dateField].gte = new Date(params.dateFrom);
-            }
-            if (params.dateTo) {
-                where[dateField].lte = new Date(params.dateTo);
-            }
+        const contractDateFilter = buildDateTimeFilter(params.dateFrom, params.dateTo);
+        if (contractDateFilter) {
+            where[dateField] = contractDateFilter;
         }
 
         // Price range filter
@@ -200,17 +235,35 @@ export class SearchService {
     }
 
     async getStats() {
-        const [tenderCount, contractCount, syncState] = await Promise.all([
+        const [tenderCount, contractCount, syncState, incompleteTenderCount, queueCounts] = await Promise.all([
             this.prisma.tender.count(),
             this.prisma.contract.count(),
             this.prisma.syncState.findFirst({
                 orderBy: { updatedAt: 'desc' }
             }),
+            this.prisma.tender.count({
+                where: { syncStatus: { in: ['PARTIAL', 'FAILED'] } },
+            }),
+            this.tenderQueue.getJobCounts(
+                'waiting',
+                'active',
+                'delayed',
+                'prioritized',
+                'waiting-children',
+            ),
         ]);
+        const pendingJobs =
+            (queueCounts.waiting || 0) +
+            (queueCounts.active || 0) +
+            (queueCounts.delayed || 0) +
+            (queueCounts.prioritized || 0) +
+            (queueCounts['waiting-children'] || 0);
+        const isFullySynced = pendingJobs === 0 && incompleteTenderCount === 0;
+
         return {
             tenders: tenderCount,
             contracts: contractCount,
-            lastSync: syncState?.updatedAt || null
+            lastSync: isFullySynced ? syncState?.updatedAt || null : null
         };
     }
 }

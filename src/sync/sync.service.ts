@@ -10,6 +10,25 @@ export class SyncService implements OnApplicationBootstrap {
   private readonly logger = new Logger(SyncService.name);
   private isSyncing = false;
   private addedCount = 0;
+  private readonly mainQueueFailedJobsToKeep = (() => {
+    const parsed = Number.parseInt(
+      process.env.MAIN_QUEUE_FAILED_JOBS_TO_KEEP || '1000',
+      10,
+    );
+
+    if (Number.isNaN(parsed) || parsed < 0) {
+      return 1000;
+    }
+
+    return parsed;
+  })();
+  private readonly retryableJobStates = new Set([
+    'waiting',
+    'active',
+    'delayed',
+    'prioritized',
+    'waiting-children',
+  ]);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -32,6 +51,86 @@ export class SyncService implements OnApplicationBootstrap {
 
   async onApplicationBootstrap() {
     this.logger.log('SyncService initialized, checking initial offset...');
+  }
+
+  private buildMainJobId(tender: {
+    id: string;
+    dateModified?: string | Date;
+  }): string {
+    const rawDateModified =
+      tender.dateModified instanceof Date
+        ? Number.isNaN(tender.dateModified.getTime())
+          ? ''
+          : tender.dateModified.toISOString()
+        : typeof tender.dateModified === 'string'
+          ? tender.dateModified
+          : '';
+    const parsedDateModified = rawDateModified ? new Date(rawDateModified) : null;
+
+    if (parsedDateModified && !Number.isNaN(parsedDateModified.getTime())) {
+      return `main-${tender.id}-${parsedDateModified.getTime()}`;
+    }
+
+    const normalizedDateModified = rawDateModified.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return normalizedDateModified
+      ? `main-${tender.id}-${normalizedDateModified}`
+      : `main-${tender.id}`;
+  }
+
+  private async queueRetryForTender(tender: {
+    id: string;
+    dateModified: Date;
+  }): Promise<void> {
+    const retryJobId = `retry-${tender.id}`;
+    const existingRetryJob = await this.tenderQueue.getJob(retryJobId);
+
+    if (!existingRetryJob) {
+      await this.tenderQueue.add(
+        'process-tender',
+        { tenderId: tender.id, dateModified: tender.dateModified },
+        {
+          jobId: retryJobId,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      );
+      return;
+    }
+
+    const existingState = await existingRetryJob.getState();
+
+    if (existingState === 'failed' || existingState === 'completed') {
+      await existingRetryJob.retry(existingState, {
+        resetAttemptsMade: true,
+        resetAttemptsStarted: true,
+      });
+      return;
+    }
+
+    if (this.retryableJobStates.has(existingState)) {
+      this.logger.log(
+        `Retry job ${retryJobId} already exists in state ${existingState}, skipping duplicate enqueue.`,
+      );
+      return;
+    }
+
+    this.logger.warn(
+      `Retry job ${retryJobId} has unexpected state ${existingState}. Recreating it.`,
+    );
+    await existingRetryJob.remove();
+    await this.tenderQueue.add(
+      'process-tender',
+      { tenderId: tender.id, dateModified: tender.dateModified },
+      {
+        jobId: retryJobId,
+        attempts: 3,
+        backoff: { type: 'exponential', delay: 5000 },
+        removeOnComplete: true,
+        removeOnFail: true,
+      },
+    );
   }
 
   @Cron('* * * * * *') // Run every 1 second
@@ -77,14 +176,17 @@ export class SyncService implements OnApplicationBootstrap {
             'process-tender',
             { tenderId: tender.id, dateModified: tender.dateModified },
             {
-              jobId: tender.id, // Prevent duplicate jobs in queue
+              // Deduplicate only the same tender version; newer dateModified values must enqueue.
+              jobId: this.buildMainJobId(tender),
               attempts: 5, // Retry up to 5 times if fails
               backoff: {
                 type: 'exponential',
                 delay: 5000, // Delay increases: 5s, 10s, 20s...
               },
               removeOnComplete: true, // Keep Redis clean
-              removeOnFail: false, // Keep failed ones for inspection
+              removeOnFail: {
+                count: this.mainQueueFailedJobsToKeep,
+              }, // Keep a bounded failed-job history for inspection
             },
           );
         }
@@ -112,42 +214,34 @@ export class SyncService implements OnApplicationBootstrap {
     }
   }
 
-  // Run every 10 minutes to retry partially synced tenders
+  // Run every 10 minutes to retry tenders that were not fully synced
   @Cron('*/10 * * * *')
   async retryPartialTenders() {
     if (process.env.APP_ROLE === 'WORKER') return;
 
-    this.logger.log('Checking for PARTIAL synced tenders to retry...');
+    this.logger.log('Checking for incomplete tenders to retry...');
     try {
-      const partialTenders = await this.prisma.tender.findMany({
-        where: { syncStatus: 'PARTIAL' },
+      const incompleteTenders = await this.prisma.tender.findMany({
+        where: { syncStatus: { in: ['PARTIAL', 'FAILED'] } },
         take: 100, // Process in batches
         orderBy: { dateModified: 'asc' }, // Oldest first
       });
 
-      if (partialTenders.length === 0) {
-        this.logger.log('No PARTIAL synced tenders found.');
+      if (incompleteTenders.length === 0) {
+        this.logger.log('No incomplete tenders found.');
         return;
       }
 
-      this.logger.log(`Found ${partialTenders.length} PARTIAL tenders. Queuing for retry.`);
+      this.logger.log(
+        `Found ${incompleteTenders.length} incomplete tenders. Queuing for retry.`,
+      );
 
-      for (const tender of partialTenders) {
-        // We add them back to the queue. 
-        // The processor will overwrite the existing DB records.
-        await this.tenderQueue.add(
-          'process-tender',
-          { tenderId: tender.id, dateModified: tender.dateModified },
-          {
-            jobId: `retry-${tender.id}`, // Unique job ID for retries
-            attempts: 3,
-            backoff: { type: 'exponential', delay: 5000 },
-            removeOnComplete: true,
-          },
-        );
+      for (const tender of incompleteTenders) {
+        // Reuse or recreate the retry job safely to avoid duplicate-job stalls.
+        await this.queueRetryForTender(tender);
 
         // Reset status to FULL so it's not picked up again until processed
-        // If it fails again, the processor will flip it back to PARTIAL
+        // If it fails again, the processor will flip it back to PARTIAL or FAILED
         await this.prisma.tender.update({
           where: { id: tender.id },
           data: { syncStatus: 'FULL' }
@@ -155,48 +249,6 @@ export class SyncService implements OnApplicationBootstrap {
       }
     } catch (error) {
       this.logger.error('Error in retryPartialTenders cron', error.stack);
-    }
-  }
-
-  async backfillTenders() {
-    this.logger.log('🚀 Starting backfill for tenders missing advanced dates...');
-    try {
-      // Find tenders where new date fields are missing
-      const tendersToBackfill = await this.prisma.tender.findMany({
-        where: {
-          tenderPeriodStart: null,
-        } as any,
-        select: {
-          id: true,
-          dateModified: true,
-        },
-      });
-
-      if (tendersToBackfill.length === 0) {
-        this.logger.log('✅ No tenders found missing advanced dates. Backfill not needed.');
-        return { count: 0 };
-      }
-
-      this.logger.log(`📥 Found ${tendersToBackfill.length} tenders to backfill. Adding to queue...`);
-
-      for (const tender of tendersToBackfill) {
-        await this.tenderQueue.add(
-          'process-tender',
-          { tenderId: tender.id, dateModified: tender.dateModified },
-          {
-            jobId: `backfill-${tender.id}`, // Unique ID for backfill to avoid conflict with normal sync
-            attempts: 5,
-            backoff: { type: 'exponential', delay: 5000 },
-            removeOnComplete: true,
-          },
-        );
-      }
-
-      this.logger.log('✅ All backfill jobs added to queue.');
-      return { count: tendersToBackfill.length };
-    } catch (error) {
-      this.logger.error('❌ Error during backfill operation', error.stack);
-      throw error;
     }
   }
 }

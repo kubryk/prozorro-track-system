@@ -13,6 +13,5 @@ import { BullModule } from '@nestjs/bullmq';
     }),
   ],
   providers: [SyncService],
-  exports: [SyncService],
 })
 export class SyncModule { }

@@ -1,6 +1,7 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ProzorroService } from '../../prozorro/prozorro.service';
 
@@ -50,18 +51,17 @@ export class TenderProcessor extends WorkerHost {
     }, STATS_INTERVAL_MS);
   }
 
-  async process(job: Job<{ tenderId: string }, any, string>): Promise<any> {
+  async process(
+    job: Job<{ tenderId: string; dateModified?: string | Date }, any, string>,
+  ): Promise<any> {
     const { tenderId } = job.data;
 
     try {
       const tenderDetails = await this.prozorroApi.getTenderDetails(tenderId);
 
       if (!tenderDetails) {
-        this.logger.warn(`No details found for tender: ${tenderId}`);
-        return;
+        throw new Error(`No details found for tender: ${tenderId}`);
       }
-
-      const tenderYear = new Date(tenderDetails.dateModified).getFullYear();
 
       // Collect Suppliers (from bids)
       const suppliers = new Map<string, string>(); // EDRPOU -> Name
@@ -97,6 +97,15 @@ export class TenderProcessor extends WorkerHost {
 
       // Helper to parse Prozorro dates
       const pDate = (d: any) => d ? new Date(d) : null;
+      const fallbackDateModified = job.data.dateModified
+        ? new Date(job.data.dateModified)
+        : new Date();
+      const safeFallbackDateModified = Number.isNaN(fallbackDateModified.getTime())
+        ? new Date()
+        : fallbackDateModified;
+      const tenderDateModified = pDate(tenderDetails.dateModified) ?? safeFallbackDateModified;
+      const tenderDateCreated = pDate(tenderDetails.dateCreated) ?? tenderDateModified;
+      const tenderYear = tenderDateModified.getFullYear();
 
       // Save Tender to database
       await this.prisma.tender.upsert({
@@ -108,7 +117,8 @@ export class TenderProcessor extends WorkerHost {
           amount: toFloat(tenderDetails.value?.amount),
           currency: tenderDetails.value?.currency || null,
           year: tenderYear,
-          dateModified: new Date(tenderDetails.dateModified),
+          dateModified: tenderDateModified,
+          dateCreated: tenderDateCreated,
           tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
           tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
           enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
@@ -117,16 +127,18 @@ export class TenderProcessor extends WorkerHost {
           awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
           customerEdrpou,
           customerName,
+          syncStatus: 'FULL',
         },
         create: {
           id: tenderDetails.id,
           tenderID: tenderDetails.tenderID,
           title: tenderDetails.title || null,
           status: tenderDetails.status,
-          amount: tenderDetails.value?.amount || null,
+          amount: toFloat(tenderDetails.value?.amount),
           currency: tenderDetails.value?.currency || null,
           year: tenderYear,
-          dateModified: new Date(tenderDetails.dateModified),
+          dateModified: tenderDateModified,
+          dateCreated: tenderDateCreated,
           tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
           tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
           enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
@@ -135,14 +147,30 @@ export class TenderProcessor extends WorkerHost {
           awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
           customerEdrpou,
           customerName,
+          syncStatus: 'FULL',
         },
       });
+
+      const contractRefs = Array.isArray(tenderDetails.contracts)
+        ? tenderDetails.contracts
+        : null;
+      const expectedContractIds: string[] = [];
+      if (contractRefs) {
+        for (const contractRef of contractRefs) {
+          if (
+            typeof contractRef?.id === 'string' &&
+            !expectedContractIds.includes(contractRef.id)
+          ) {
+            expectedContractIds.push(contractRef.id);
+          }
+        }
+      }
 
       // Save Contracts (with separate API call for full details)
       let contractsCount = 0;
       let hasFailedContracts = false;
-      if (tenderDetails.contracts && Array.isArray(tenderDetails.contracts)) {
-        for (const contractRef of tenderDetails.contracts) {
+      if (contractRefs) {
+        for (const contractRef of contractRefs) {
           try {
             // Fetch full contract details from a separate API endpoint
             const contract = await this.prozorroApi.getContractDetails(
@@ -227,6 +255,24 @@ export class TenderProcessor extends WorkerHost {
             );
           }
         }
+
+        const deleteWhere: Prisma.ContractWhereInput =
+          expectedContractIds.length > 0
+            ? {
+                tenderId: tenderDetails.id,
+                id: { notIn: expectedContractIds },
+              }
+            : { tenderId: tenderDetails.id };
+
+        const { count: deletedContracts } = await this.prisma.contract.deleteMany({
+          where: deleteWhere,
+        });
+
+        if (deletedContracts > 0) {
+          this.logger.log(
+            `Removed ${deletedContracts} stale contracts for tender ${tenderId}`,
+          );
+        }
       }
 
       // Update Tender status if there were failures
@@ -250,6 +296,27 @@ export class TenderProcessor extends WorkerHost {
       };
     } catch (error) {
       this.errorCount++;
+      const fallbackDateModified = job.data.dateModified
+        ? new Date(job.data.dateModified)
+        : new Date();
+      const safeDateModified = Number.isNaN(fallbackDateModified.getTime())
+        ? new Date()
+        : fallbackDateModified;
+
+      await this.prisma.tender.upsert({
+        where: { id: tenderId },
+        update: {
+          year: safeDateModified.getFullYear(),
+          dateModified: safeDateModified,
+          syncStatus: 'FAILED',
+        },
+        create: {
+          id: tenderId,
+          year: safeDateModified.getFullYear(),
+          dateModified: safeDateModified,
+          syncStatus: 'FAILED',
+        },
+      });
       this.logger.error(
         `Failed to process tender ${tenderId}: ${error.message}`,
         error.stack,

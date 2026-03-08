@@ -52,13 +52,14 @@ export class ProzorroService {
     offset?: string,
   ): Promise<{ data: any[]; nextPageOffset: string | null }> {
     try {
-      const url = offset
-        ? `${this.baseUrl}/tenders?offset=${offset}`
-        : `${this.baseUrl}/tenders`;
+      const url = new URL(`${this.baseUrl}/tenders`);
+      if (offset) {
+        url.searchParams.set('offset', offset);
+      }
 
 
       const response = await firstValueFrom(
-        this.httpService.get(url).pipe(retry(this.getRetryConfig())),
+        this.httpService.get(url.toString()).pipe(retry(this.getRetryConfig())),
       );
       const responseData = response.data;
 
