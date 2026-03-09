@@ -6,6 +6,19 @@ import { PrismaService } from '../../prisma/prisma.service';
 import { ProzorroService } from '../../prozorro/prozorro.service';
 
 const STATS_INTERVAL_MS = 30_000; // Print summary every 30 seconds
+const DEFAULT_WORKER_CONCURRENCY = 50;
+const DEFAULT_WORKER_DB_CONCURRENCY = 2;
+const DEFAULT_WORKER_LOCK_DURATION_MS = 300_000;
+
+function parsePositiveIntEnv(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value || '', 10);
+
+  if (Number.isNaN(parsed) || parsed < 1) {
+    return fallback;
+  }
+
+  return parsed;
+}
 
 /** Safely parse a value to Float — Prozorro API sometimes returns numbers as strings */
 function toFloat(val: any): number | null {
@@ -17,22 +30,23 @@ function toFloat(val: any): number | null {
 @Processor('tender-processor', {
   // concurrency — скільки задач BullMQ тримає одночасно в пам'яті.
   // Реальний ліміт запитів до API — в ProzorroService (WORKER_REQUESTS_PER_SECOND)
-  concurrency: parseInt(process.env.WORKER_CONCURRENCY || '50', 10),
+  concurrency: parsePositiveIntEnv(
+    process.env.WORKER_CONCURRENCY,
+    DEFAULT_WORKER_CONCURRENCY,
+  ),
+  // BullMQ lock must outlive slower tenders; otherwise a long-running job can
+  // lose its lock and then fail on moveToFinished/moveToDelayed.
+  lockDuration: parsePositiveIntEnv(
+    process.env.WORKER_LOCK_DURATION_MS,
+    DEFAULT_WORKER_LOCK_DURATION_MS,
+  ),
 })
 export class TenderProcessor extends WorkerHost {
   private readonly logger = new Logger(TenderProcessor.name);
-  private readonly maxDbWriteConcurrency = (() => {
-    const parsed = Number.parseInt(
-      process.env.WORKER_DB_CONCURRENCY || '2',
-      10,
-    );
-
-    if (Number.isNaN(parsed) || parsed < 1) {
-      return 2;
-    }
-
-    return parsed;
-  })();
+  private readonly maxDbWriteConcurrency = parsePositiveIntEnv(
+    process.env.WORKER_DB_CONCURRENCY,
+    DEFAULT_WORKER_DB_CONCURRENCY,
+  );
   private activeDbWriteSlots = 0;
   private readonly pendingDbWriteWaiters: Array<() => void> = [];
 

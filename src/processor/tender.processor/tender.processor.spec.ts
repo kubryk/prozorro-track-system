@@ -47,6 +47,26 @@ describe('TenderProcessor', () => {
   afterEach(() => {
     jest.restoreAllMocks();
     delete process.env.WORKER_DB_CONCURRENCY;
+    delete process.env.WORKER_LOCK_DURATION_MS;
+  });
+
+  it('передає збільшений lockDuration у BullMQ worker metadata', () => {
+    process.env.WORKER_LOCK_DURATION_MS = '180000';
+
+    jest.isolateModules(() => {
+      const { WORKER_METADATA: isolatedWorkerMetadata } = require('@nestjs/bullmq/dist/bull.constants');
+      const { TenderProcessor: IsolatedTenderProcessor } = require('./tender.processor');
+      const workerOptions = Reflect.getMetadata(
+        isolatedWorkerMetadata,
+        IsolatedTenderProcessor,
+      );
+
+      expect(workerOptions).toEqual(
+        expect.objectContaining({
+          lockDuration: 180000,
+        }),
+      );
+    });
   });
 
   it('обмежує одночасні DB write-транзакції, щоб не вибивати Prisma pool', async () => {
