@@ -1,5 +1,6 @@
 import { Transform } from 'class-transformer';
 import {
+  IsArray,
   IsDateString,
   IsIn,
   IsInt,
@@ -10,9 +11,20 @@ import {
   Max,
   Min,
 } from 'class-validator';
-import { toOptionalNumber, toOptionalString } from './search-query.helpers';
+import {
+  toOptionalNumber,
+  toOptionalString,
+  toOptionalStringArray,
+} from './search-query.helpers';
 
 const contractDateTypes = ['dateModified', 'dateSigned'] as const;
+const contractSortTypes = [
+  'default',
+  'amountAsc',
+  'amountDesc',
+  'dateSignedDesc',
+  'dateSignedAsc',
+] as const;
 
 export class SearchContractsQueryDto {
   @IsOptional()
@@ -21,13 +33,16 @@ export class SearchContractsQueryDto {
   edrpou?: string;
 
   @IsOptional()
-  @IsIn(['customer', 'supplier'])
-  role?: 'customer' | 'supplier';
+  @Transform(toOptionalStringArray)
+  @IsArray()
+  @IsIn(['customer', 'supplier'], { each: true })
+  role?: ('customer' | 'supplier')[];
 
   @IsOptional()
-  @Transform(toOptionalString)
-  @IsString()
-  status?: string;
+  @Transform(toOptionalStringArray)
+  @IsArray()
+  @IsString({ each: true })
+  status?: string[];
 
   @IsOptional()
   @IsDateString()
@@ -52,6 +67,10 @@ export class SearchContractsQueryDto {
   @IsOptional()
   @IsIn(contractDateTypes)
   dateType?: (typeof contractDateTypes)[number];
+
+  @IsOptional()
+  @IsIn(contractSortTypes)
+  sort?: (typeof contractSortTypes)[number];
 
   @IsOptional()
   @Transform(toOptionalNumber)

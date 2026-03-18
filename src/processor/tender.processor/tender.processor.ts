@@ -183,13 +183,13 @@ export class TenderProcessor extends WorkerHost {
       let contractsCount = 0;
       let hasFailedContracts = false;
       const contractDetailsToPersist: any[] = [];
-      if (contractRefs) {
-        for (const contractRef of contractRefs) {
+      if (expectedContractIds.length > 0) {
+        for (const contractId of expectedContractIds) {
           try {
             // Fetch full contract details from a separate API endpoint
             const contract = await this.prozorroApi.getContractDetails(
               tenderId,
-              contractRef.id,
+              contractId,
             );
             if (!contract) continue;
 
@@ -198,154 +198,135 @@ export class TenderProcessor extends WorkerHost {
             // Don't fail the entire tender if one contract has issues
             hasFailedContracts = true;
             this.logger.warn(
-              `Skipping contract ${contractRef.id} for tender ${tenderId}: ${contractError.message}`,
+              `Skipping contract ${contractId} for tender ${tenderId}: ${contractError.message}`,
             );
           }
         }
       }
       contractsCount = contractDetailsToPersist.length;
 
-      const deletedContracts = await this.withDbWriteSlot(() =>
-        this.prisma.$transaction(async (tx) => {
-          await tx.tender.upsert({
-            where: { id: tenderDetails.id },
-            update: {
-              tenderID: tenderDetails.tenderID,
-              title: tenderDetails.title || null,
-              status: tenderDetails.status,
-              amount: toFloat(tenderDetails.value?.amount),
-              currency: tenderDetails.value?.currency || null,
-              year: tenderYear,
-              dateModified: tenderDateModified,
-              dateCreated: tenderDateCreated,
-              tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
-              tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
-              enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
-              enquiryPeriodEnd: pDate(tenderDetails.enquiryPeriod?.endDate),
-              auctionPeriodStart: pDate(tenderDetails.auctionPeriod?.startDate),
-              awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
-              customerEdrpou,
-              customerName,
-              syncStatus: 'FULL',
-            },
-            create: {
-              id: tenderDetails.id,
-              tenderID: tenderDetails.tenderID,
-              title: tenderDetails.title || null,
-              status: tenderDetails.status,
-              amount: toFloat(tenderDetails.value?.amount),
-              currency: tenderDetails.value?.currency || null,
-              year: tenderYear,
-              dateModified: tenderDateModified,
-              dateCreated: tenderDateCreated,
-              tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
-              tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
-              enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
-              enquiryPeriodEnd: pDate(tenderDetails.enquiryPeriod?.endDate),
-              auctionPeriodStart: pDate(tenderDetails.auctionPeriod?.startDate),
-              awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
-              customerEdrpou,
-              customerName,
-              syncStatus: 'FULL',
-            },
-          });
+      const tenderWriteData = {
+        tenderID: tenderDetails.tenderID,
+        title: tenderDetails.title || null,
+        status: tenderDetails.status,
+        amount: toFloat(tenderDetails.value?.amount),
+        currency: tenderDetails.value?.currency || null,
+        year: tenderYear,
+        dateModified: tenderDateModified,
+        dateCreated: tenderDateCreated,
+        tenderPeriodStart: pDate(tenderDetails.tenderPeriod?.startDate),
+        tenderPeriodEnd: pDate(tenderDetails.tenderPeriod?.endDate),
+        enquiryPeriodStart: pDate(tenderDetails.enquiryPeriod?.startDate),
+        enquiryPeriodEnd: pDate(tenderDetails.enquiryPeriod?.endDate),
+        auctionPeriodStart: pDate(tenderDetails.auctionPeriod?.startDate),
+        awardPeriodStart: pDate(tenderDetails.awardPeriod?.startDate),
+        customerEdrpou,
+        customerName,
+        syncStatus: 'FULL' as const,
+      };
 
-          for (const contract of contractDetailsToPersist) {
-            // Support both new format (contract.value.amount) and old format (contract.amount)
-            const value = contract.value || {};
-            const amount = toFloat(value.amount ?? contract.amount);
-            const currency = value.currency || contract.currency || null;
-            const vatIncluded =
-              value.valueAddedTaxIncluded ??
-              contract.valueAddedTaxIncluded ??
-              null;
-            const amountNet = toFloat(value.amountNet ?? contract.amountNet);
+      const contractWrites = contractDetailsToPersist.map((contract) => {
+        // Support both new format (contract.value.amount) and old format (contract.amount)
+        const value = contract.value || {};
+        const amount = toFloat(value.amount ?? contract.amount);
+        const currency = value.currency || contract.currency || null;
+        const vatIncluded =
+          value.valueAddedTaxIncluded ??
+          contract.valueAddedTaxIncluded ??
+          null;
+        const amountNet = toFloat(value.amountNet ?? contract.amountNet);
 
-            // Extract Supplier for this contract
-            let supplierEdrpou: string | null = null;
-            let supplierName: string | null = null;
+        // Extract Supplier for this contract
+        let supplierEdrpou: string | null = null;
+        let supplierName: string | null = null;
 
-            if (
-              contract.suppliers &&
-              Array.isArray(contract.suppliers) &&
-              contract.suppliers.length > 0
-            ) {
-              const supplier = contract.suppliers[0];
-              supplierEdrpou = supplier.identifier?.id || null;
-              supplierName = supplier.name || supplier.identifier?.legalName || null;
+        if (
+          contract.suppliers &&
+          Array.isArray(contract.suppliers) &&
+          contract.suppliers.length > 0
+        ) {
+          const supplier = contract.suppliers[0];
+          supplierEdrpou = supplier.identifier?.id || null;
+          supplierName = supplier.name || supplier.identifier?.legalName || null;
+        }
+
+        return {
+          id: contract.id,
+          data: {
+            contractID: contract.contractID || null,
+            status: contract.status || null,
+            amount,
+            currency,
+            valueAddedTaxIncluded: vatIncluded,
+            amountNet,
+            dateSigned: contract.dateSigned
+              ? new Date(contract.dateSigned)
+              : null,
+            date: contract.date ? new Date(contract.date) : null,
+            dateModified: contract.dateModified
+              ? new Date(contract.dateModified)
+              : null,
+            dateCreated: contract.dateCreated
+              ? new Date(contract.dateCreated)
+              : null,
+            supplierEdrpou,
+            supplierName,
+            tenderId: tenderDetails.id,
+          },
+        };
+      });
+
+      const deleteWhere: Prisma.ContractWhereInput =
+        expectedContractIds.length > 0
+          ? {
+              tenderId: tenderDetails.id,
+              id: { notIn: expectedContractIds },
             }
+          : { tenderId: tenderDetails.id };
 
-            await tx.contract.upsert({
-              where: { id: contract.id },
-              update: {
-                contractID: contract.contractID || null,
-                status: contract.status || null,
-                amount,
-                currency,
-                valueAddedTaxIncluded: vatIncluded,
-                amountNet,
-                dateSigned: contract.dateSigned
-                  ? new Date(contract.dateSigned)
-                  : null,
-                date: contract.date ? new Date(contract.date) : null,
-                dateModified: contract.dateModified
-                  ? new Date(contract.dateModified)
-                  : null,
-                dateCreated: contract.dateCreated
-                  ? new Date(contract.dateCreated)
-                  : null,
-                supplierEdrpou,
-                supplierName,
-                tenderId: tenderDetails.id,
-              },
-              create: {
-                id: contract.id,
-                contractID: contract.contractID || null,
-                status: contract.status || null,
-                amount,
-                currency,
-                valueAddedTaxIncluded: vatIncluded,
-                amountNet,
-                dateSigned: contract.dateSigned
-                  ? new Date(contract.dateSigned)
-                  : null,
-                date: contract.date ? new Date(contract.date) : null,
-                dateModified: contract.dateModified
-                  ? new Date(contract.dateModified)
-                  : null,
-                dateCreated: contract.dateCreated
-                  ? new Date(contract.dateCreated)
-                  : null,
-                supplierEdrpou,
-                supplierName,
-                tenderId: tenderDetails.id,
-              },
-            });
-          }
-
-          const deleteWhere: Prisma.ContractWhereInput =
-            expectedContractIds.length > 0
-              ? {
-                  tenderId: tenderDetails.id,
-                  id: { notIn: expectedContractIds },
-                }
-              : { tenderId: tenderDetails.id };
-
-          const { count: deletedContractsCount } = await tx.contract.deleteMany({
-            where: deleteWhere,
-          });
-
-          if (hasFailedContracts) {
-            this.partialCount++;
-            await tx.tender.update({
-              where: { id: tenderDetails.id },
-              data: { syncStatus: 'PARTIAL' },
-            });
-          }
-
-          return deletedContractsCount;
+      const deleteResultIndex = 1 + contractWrites.length;
+      const transactionOperations: Prisma.PrismaPromise<unknown>[] = [
+        this.prisma.tender.upsert({
+          where: { id: tenderDetails.id },
+          update: tenderWriteData,
+          create: {
+            id: tenderDetails.id,
+            ...tenderWriteData,
+          },
         }),
+        ...contractWrites.map(({ id, data }) =>
+          this.prisma.contract.upsert({
+            where: { id },
+            update: data,
+            create: {
+              id,
+              ...data,
+            },
+          }),
+        ),
+        this.prisma.contract.deleteMany({
+          where: deleteWhere,
+        }),
+      ];
+
+      if (hasFailedContracts) {
+        transactionOperations.push(
+          this.prisma.tender.update({
+            where: { id: tenderDetails.id },
+            data: { syncStatus: 'PARTIAL' },
+          }),
+        );
+      }
+
+      const transactionResults = await this.withDbWriteSlot(() =>
+        this.prisma.$transaction(transactionOperations),
       );
+      const deletedContracts =
+        (transactionResults[deleteResultIndex] as Prisma.BatchPayload).count ?? 0;
+
+      if (hasFailedContracts) {
+        this.partialCount++;
+      }
 
       if (deletedContracts > 0) {
         this.logger.log(

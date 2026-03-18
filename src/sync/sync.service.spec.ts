@@ -10,6 +10,7 @@ describe('SyncService', () => {
       update: jest.Mock;
     };
     tender: {
+      count: jest.Mock;
       findMany: jest.Mock;
       update: jest.Mock;
     };
@@ -22,9 +23,14 @@ describe('SyncService', () => {
     getJobCounts: jest.Mock;
     getJob: jest.Mock;
   };
+  let statsIntervalHandler: (() => Promise<void> | void) | undefined;
 
   beforeEach(() => {
-    jest.spyOn(global, 'setInterval').mockImplementation(() => 0 as any);
+    statsIntervalHandler = undefined;
+    jest.spyOn(global, 'setInterval').mockImplementation((handler: TimerHandler) => {
+      statsIntervalHandler = handler as () => Promise<void> | void;
+      return 0 as any;
+    });
     jest.spyOn(Logger.prototype, 'log').mockImplementation();
     jest.spyOn(Logger.prototype, 'error').mockImplementation();
     delete process.env.APP_ROLE;
@@ -36,6 +42,7 @@ describe('SyncService', () => {
         update: jest.fn(),
       },
       tender: {
+        count: jest.fn().mockResolvedValue(0),
         findMany: jest.fn(),
         update: jest.fn().mockResolvedValue(undefined),
       },
@@ -132,6 +139,35 @@ describe('SyncService', () => {
           count: 1000,
         },
       },
+    );
+  });
+
+  it('не логує лише історичні failed jobs як активні помилки, якщо живої роботи вже немає', async () => {
+    tenderQueue.getJobCounts.mockResolvedValue({
+      waiting: 0,
+      active: 0,
+      failed: 287,
+    });
+    prisma.tender.count.mockResolvedValue(0);
+
+    await statsIntervalHandler?.();
+
+    expect(Logger.prototype.log).not.toHaveBeenCalled();
+  });
+
+  it('у статистиці явно позначає failed jobs як історію та показує незавершені тендери в БД', async () => {
+    tenderQueue.getJobCounts.mockResolvedValue({
+      waiting: 83307,
+      active: 150,
+      failed: 287,
+    });
+    prisma.tender.count.mockResolvedValue(12);
+    (service as any).addedCount = 8;
+
+    await statsIntervalHandler?.();
+
+    expect(Logger.prototype.log).toHaveBeenCalledWith(
+      '📥 За 30с: додано 8 тендерів у чергу | Черга: 83307 очікують, 150 активних, 287 історичних failed jobs | БД: 12 незавершених тендерів',
     );
   });
 

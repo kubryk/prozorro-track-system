@@ -5,6 +5,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 
 export type EdrpouRole = 'customer' | 'supplier';
+type TenderRoleFilter = EdrpouRole | EdrpouRole[];
+type ContractRoleFilter = EdrpouRole | EdrpouRole[];
 
 const DATE_ONLY_QUERY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -46,6 +48,96 @@ function buildDateTimeFilter(
     return filter;
 }
 
+type ContractSortOption =
+    | 'default'
+    | 'amountAsc'
+    | 'amountDesc'
+    | 'dateSignedDesc'
+    | 'dateSignedAsc';
+
+type TenderSortOption =
+    | 'default'
+    | 'dateCreatedDesc'
+    | 'dateCreatedAsc'
+    | 'amountAsc'
+    | 'amountDesc';
+
+function buildTenderOrderBy(
+    sort: TenderSortOption | undefined,
+    dateField: keyof Pick<
+        Prisma.TenderOrderByWithRelationInput,
+        | 'dateModified'
+        | 'dateCreated'
+        | 'tenderPeriodStart'
+        | 'tenderPeriodEnd'
+        | 'enquiryPeriodStart'
+        | 'enquiryPeriodEnd'
+        | 'auctionPeriodStart'
+        | 'awardPeriodStart'
+    >,
+): Prisma.TenderOrderByWithRelationInput[] {
+    const defaultOrder = { [dateField]: 'desc' } as Prisma.TenderOrderByWithRelationInput;
+
+    switch (sort) {
+        case 'dateCreatedAsc':
+            return [
+                { dateCreated: 'asc' },
+                { dateModified: 'desc' },
+            ];
+        case 'dateCreatedDesc':
+            return [
+                { dateCreated: 'desc' },
+                { dateModified: 'desc' },
+            ];
+        case 'amountAsc':
+            return [
+                { amount: 'asc' },
+                { dateCreated: 'desc' },
+            ];
+        case 'amountDesc':
+            return [
+                { amount: 'desc' },
+                { dateCreated: 'desc' },
+            ];
+        case 'default':
+        default:
+            return [defaultOrder];
+    }
+}
+
+function buildContractOrderBy(
+    sort: ContractSortOption | undefined,
+    dateField: 'dateModified' | 'dateSigned',
+): Prisma.ContractOrderByWithRelationInput[] {
+    const defaultOrder = { [dateField]: 'desc' } as Prisma.ContractOrderByWithRelationInput;
+
+    switch (sort) {
+        case 'amountAsc':
+            return [
+                { amount: 'asc' },
+                { dateSigned: 'desc' },
+            ];
+        case 'amountDesc':
+            return [
+                { amount: 'desc' },
+                { dateSigned: 'desc' },
+            ];
+        case 'dateSignedAsc':
+            return [
+                { dateSigned: 'asc' },
+                { dateModified: 'desc' },
+            ];
+        case 'dateSignedDesc':
+            return [
+                { dateSigned: 'desc' },
+                { dateModified: 'desc' },
+            ];
+        case 'default':
+        default:
+            return [defaultOrder];
+    }
+}
+
 @Injectable()
 export class SearchService {
     constructor(
@@ -63,11 +155,12 @@ export class SearchService {
      */
     async searchTenders(params: {
         edrpou?: string;
-        role?: EdrpouRole;
-        status?: string;
+        role?: TenderRoleFilter;
+        status?: string | string[];
         dateFrom?: string;
         dateTo?: string;
         dateType?: string;
+        sort?: TenderSortOption;
         priceFrom?: number;
         priceTo?: number;
         skip?: number;
@@ -77,23 +170,42 @@ export class SearchService {
         const skip = params.skip || 0;
 
         const where: any = {};
+        const roles = Array.isArray(params.role)
+            ? params.role
+            : params.role
+                ? [params.role]
+                : ['customer'];
+        const statuses = Array.isArray(params.status)
+            ? params.status
+            : params.status
+                ? [params.status]
+                : [];
 
         // EDRPOU filter based on role
         if (params.edrpou) {
-            const role = params.role || 'customer';
-            if (role === 'customer') {
+            if (roles.length === 1 && roles[0] === 'customer') {
                 where.customerEdrpou = params.edrpou;
-            } else {
-                // supplier — search tenders that have contracts with this supplier
+            } else if (roles.length === 1 && roles[0] === 'supplier') {
                 where.contracts = {
                     some: { supplierEdrpou: params.edrpou },
                 };
+            } else {
+                where.OR = [
+                    { customerEdrpou: params.edrpou },
+                    {
+                        contracts: {
+                            some: { supplierEdrpou: params.edrpou },
+                        },
+                    },
+                ];
             }
         }
 
         // Status filter
-        if (params.status) {
-            where.status = params.status;
+        if (statuses.length > 0) {
+            where.status = {
+                in: statuses,
+            };
         }
 
         // Date range filter
@@ -106,6 +218,7 @@ export class SearchService {
                             dateType === 'auctionPeriodStart' ? 'auctionPeriodStart' :
                                 dateType === 'awardPeriodStart' ? 'awardPeriodStart' :
                                     'dateModified';
+        const orderBy = buildTenderOrderBy(params.sort, dateField);
 
         const tenderDateFilter = buildDateTimeFilter(params.dateFrom, params.dateTo);
         if (tenderDateFilter) {
@@ -123,12 +236,12 @@ export class SearchService {
             }
         }
 
-        const [data, total] = await Promise.all([
+        const [data, total, relatedContractTotal] = await Promise.all([
             this.prisma.tender.findMany({
                 where,
                 skip,
                 take: safeTake,
-                orderBy: { [dateField]: 'desc' },
+                orderBy,
                 include: {
                     contracts: {
                         select: {
@@ -143,9 +256,20 @@ export class SearchService {
                 },
             }),
             this.prisma.tender.count({ where }),
+            this.prisma.contract.count({
+                where: {
+                    tender: where,
+                },
+            }),
         ]);
 
-        return { data, total, skip, take: safeTake };
+        return {
+            data,
+            total,
+            relatedContractTotal,
+            skip,
+            take: safeTake,
+        };
     }
 
     /**
@@ -158,13 +282,14 @@ export class SearchService {
      */
     async searchContracts(params: {
         edrpou?: string;
-        role?: EdrpouRole;
-        status?: string;
+        role?: ContractRoleFilter;
+        status?: string | string[];
         dateFrom?: string;
         dateTo?: string;
         priceFrom?: number;
         priceTo?: number;
         dateType?: string;
+        sort?: ContractSortOption;
         skip?: number;
         take?: number;
     }) {
@@ -172,26 +297,42 @@ export class SearchService {
         const skip = params.skip || 0;
 
         const where: any = {};
+        const roles = Array.isArray(params.role)
+            ? params.role
+            : params.role
+                ? [params.role]
+                : ['supplier'];
+        const statuses = Array.isArray(params.status)
+            ? params.status
+            : params.status
+                ? [params.status]
+                : [];
 
         // EDRPOU filter based on role
         if (params.edrpou) {
-            const role = params.role || 'supplier';
-            if (role === 'supplier') {
+            if (roles.length === 1 && roles[0] === 'supplier') {
                 where.supplierEdrpou = params.edrpou;
-            } else {
-                // customer — search contracts via related tender's customerEdrpou
+            } else if (roles.length === 1 && roles[0] === 'customer') {
                 where.tender = { customerEdrpou: params.edrpou };
+            } else {
+                where.OR = [
+                    { supplierEdrpou: params.edrpou },
+                    { tender: { customerEdrpou: params.edrpou } },
+                ];
             }
         }
 
         // Status filter
-        if (params.status) {
-            where.status = params.status;
+        if (statuses.length > 0) {
+            where.status = {
+                in: statuses,
+            };
         }
 
         // Date range filter
         const dateType = params.dateType || 'dateSigned';
         const dateField = dateType === 'dateModified' ? 'dateModified' : 'dateSigned';
+        const orderBy = buildContractOrderBy(params.sort, dateField);
 
         const contractDateFilter = buildDateTimeFilter(params.dateFrom, params.dateTo);
         if (contractDateFilter) {
@@ -209,12 +350,12 @@ export class SearchService {
             }
         }
 
-        const [data, total] = await Promise.all([
+        const [data, total, relatedTenders] = await Promise.all([
             this.prisma.contract.findMany({
                 where,
                 skip,
                 take: safeTake,
-                orderBy: { [dateField]: 'desc' },
+                orderBy,
                 include: {
                     tender: {
                         select: {
@@ -229,9 +370,22 @@ export class SearchService {
                 },
             }),
             this.prisma.contract.count({ where }),
+            this.prisma.contract.findMany({
+                where,
+                distinct: ['tenderId'],
+                select: {
+                    tenderId: true,
+                },
+            }),
         ]);
 
-        return { data, total, skip, take: safeTake };
+        return {
+            data,
+            total,
+            relatedTenderTotal: relatedTenders.length,
+            skip,
+            take: safeTake,
+        };
     }
 
     async getStats() {

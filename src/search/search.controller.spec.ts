@@ -26,8 +26,8 @@ describe('SearchController', () => {
     });
     const query: SearchTendersQueryDto = {
       edrpou: '12345678',
-      role: 'supplier',
-      status: 'active',
+      role: ['supplier'],
+      status: ['active'],
       dateFrom: '2026-01-01',
       dateTo: '2026-01-31',
       dateType: 'dateModified',
@@ -51,8 +51,8 @@ describe('SearchController', () => {
     });
     const query: SearchContractsQueryDto = {
       edrpou: '12345678',
-      role: 'customer',
-      status: 'active',
+      role: ['supplier', 'customer'],
+      status: ['active', 'terminated'],
       dateFrom: '2026-02-01',
       dateTo: '2026-02-28',
       dateType: 'dateSigned',

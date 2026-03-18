@@ -36,11 +36,41 @@ describe('Search query validation', () => {
       ),
     ).resolves.toMatchObject({
       edrpou: '3077403474',
-      role: 'supplier',
+      role: ['supplier'],
       dateFrom: '2026-01-01',
       priceFrom: 1000.5,
       skip: 5,
       take: 25,
+    });
+  });
+
+  it('підтримує comma-separated ролі й статуси для пошуку тендерів', async () => {
+    await expect(
+      transformQuery(
+        {
+          role: 'customer,supplier',
+          status: 'active,complete',
+        },
+        SearchTendersQueryDto,
+      ),
+    ).resolves.toMatchObject({
+      role: ['customer', 'supplier'],
+      status: ['active', 'complete'],
+    });
+  });
+
+  it('підтримує comma-separated ролі й статуси для пошуку контрактів', async () => {
+    await expect(
+      transformQuery(
+        {
+          role: 'supplier,customer',
+          status: 'active,terminated',
+        },
+        SearchContractsQueryDto,
+      ),
+    ).resolves.toMatchObject({
+      role: ['supplier', 'customer'],
+      status: ['active', 'terminated'],
     });
   });
 
@@ -63,6 +93,28 @@ describe('Search query validation', () => {
       transformQuery(
         {
           dateType: 'awardPeriodStart',
+        },
+        SearchContractsQueryDto,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('відхиляє некоректний sort для пошуку тендерів', async () => {
+    await expect(
+      transformQuery(
+        {
+          sort: 'newestFirst',
+        },
+        SearchTendersQueryDto,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('відхиляє некоректний sort для пошуку контрактів', async () => {
+    await expect(
+      transformQuery(
+        {
+          sort: 'priceHigh',
         },
         SearchContractsQueryDto,
       ),

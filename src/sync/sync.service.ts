@@ -10,6 +10,7 @@ export class SyncService implements OnApplicationBootstrap {
   private readonly logger = new Logger(SyncService.name);
   private isSyncing = false;
   private addedCount = 0;
+  private readonly incompleteSyncStatuses = ['PARTIAL', 'FAILED'] as const;
   private readonly mainQueueFailedJobsToKeep = (() => {
     const parsed = Number.parseInt(
       process.env.MAIN_QUEUE_FAILED_JOBS_TO_KEEP || '1000',
@@ -39,10 +40,22 @@ export class SyncService implements OnApplicationBootstrap {
     setInterval(async () => {
       if (process.env.APP_ROLE === 'WORKER') return;
       try {
-        const counts = await this.tenderQueue.getJobCounts();
-        if (this.addedCount === 0 && counts.waiting === 0) return;
+        const [counts, incompleteTendersCount] = await Promise.all([
+          this.tenderQueue.getJobCounts('waiting', 'active', 'failed'),
+          this.prisma.tender.count({
+            where: { syncStatus: { in: [...this.incompleteSyncStatuses] } },
+          }),
+        ]);
+        if (
+          this.addedCount === 0 &&
+          counts.waiting === 0 &&
+          counts.active === 0 &&
+          incompleteTendersCount === 0
+        ) {
+          return;
+        }
         this.logger.log(
-          `📥 За 30с: додано ${this.addedCount} тендерів у чергу | Черга: ${counts.waiting} очікують, ${counts.active} активних, ${counts.failed} помилок`,
+          `📥 За 30с: додано ${this.addedCount} тендерів у чергу | Черга: ${counts.waiting} очікують, ${counts.active} активних, ${counts.failed} історичних failed jobs | БД: ${incompleteTendersCount} незавершених тендерів`,
         );
         this.addedCount = 0;
       } catch { /* ignore */ }
@@ -222,7 +235,7 @@ export class SyncService implements OnApplicationBootstrap {
     this.logger.log('Checking for incomplete tenders to retry...');
     try {
       const incompleteTenders = await this.prisma.tender.findMany({
-        where: { syncStatus: { in: ['PARTIAL', 'FAILED'] } },
+        where: { syncStatus: { in: [...this.incompleteSyncStatuses] } },
         take: 100, // Process in batches
         orderBy: { dateModified: 'asc' }, // Oldest first
       });

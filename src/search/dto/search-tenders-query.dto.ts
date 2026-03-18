@@ -1,5 +1,6 @@
 import { Transform } from 'class-transformer';
 import {
+  IsArray,
   IsDateString,
   IsIn,
   IsInt,
@@ -10,7 +11,11 @@ import {
   Max,
   Min,
 } from 'class-validator';
-import { toOptionalNumber, toOptionalString } from './search-query.helpers';
+import {
+  toOptionalNumber,
+  toOptionalString,
+  toOptionalStringArray,
+} from './search-query.helpers';
 
 const tenderDateTypes = [
   'dateModified',
@@ -22,6 +27,13 @@ const tenderDateTypes = [
   'auctionPeriodStart',
   'awardPeriodStart',
 ] as const;
+const tenderSortTypes = [
+  'default',
+  'dateCreatedDesc',
+  'dateCreatedAsc',
+  'amountAsc',
+  'amountDesc',
+] as const;
 
 export class SearchTendersQueryDto {
   @IsOptional()
@@ -30,13 +42,16 @@ export class SearchTendersQueryDto {
   edrpou?: string;
 
   @IsOptional()
-  @IsIn(['customer', 'supplier'])
-  role?: 'customer' | 'supplier';
+  @Transform(toOptionalStringArray)
+  @IsArray()
+  @IsIn(['customer', 'supplier'], { each: true })
+  role?: ('customer' | 'supplier')[];
 
   @IsOptional()
-  @Transform(toOptionalString)
-  @IsString()
-  status?: string;
+  @Transform(toOptionalStringArray)
+  @IsArray()
+  @IsString({ each: true })
+  status?: string[];
 
   @IsOptional()
   @IsDateString()
@@ -61,6 +76,10 @@ export class SearchTendersQueryDto {
   @IsOptional()
   @IsIn(tenderDateTypes)
   dateType?: (typeof tenderDateTypes)[number];
+
+  @IsOptional()
+  @IsIn(tenderSortTypes)
+  sort?: (typeof tenderSortTypes)[number];
 
   @IsOptional()
   @Transform(toOptionalNumber)

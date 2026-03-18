@@ -29,12 +29,16 @@ describe('TenderProcessor', () => {
         deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
     };
-    prisma.$transaction.mockImplementation(async (callback: any) =>
-      callback({
-        tender: prisma.tender,
-        contract: prisma.contract,
-      }),
-    );
+    prisma.$transaction.mockImplementation(async (operationsOrCallback: any) => {
+      if (typeof operationsOrCallback === 'function') {
+        return operationsOrCallback({
+          tender: prisma.tender,
+          contract: prisma.contract,
+        });
+      }
+
+      return Promise.all(operationsOrCallback);
+    });
 
     prozorroApi = {
       getTenderDetails: jest.fn(),
@@ -80,7 +84,7 @@ describe('TenderProcessor', () => {
       releaseFirstTransaction = resolve;
     });
 
-    prisma.$transaction.mockImplementation(async (callback: any) => {
+    prisma.$transaction.mockImplementation(async (operationsOrCallback: any) => {
       transactionCall++;
       activeTransactions++;
       maxActiveTransactions = Math.max(maxActiveTransactions, activeTransactions);
@@ -90,10 +94,14 @@ describe('TenderProcessor', () => {
       }
 
       try {
-        return await callback({
-          tender: prisma.tender,
-          contract: prisma.contract,
-        });
+        if (typeof operationsOrCallback === 'function') {
+          return await operationsOrCallback({
+            tender: prisma.tender,
+            contract: prisma.contract,
+          });
+        }
+
+        return await Promise.all(operationsOrCallback);
       } finally {
         activeTransactions--;
       }

@@ -67,7 +67,7 @@ describe('SearchService', () => {
       },
       skip: 0,
       take: 100,
-      orderBy: { dateModified: 'desc' },
+      orderBy: [{ dateModified: 'desc' }],
       include: {
         contracts: {
           select: {
@@ -94,6 +94,45 @@ describe('SearchService', () => {
     });
   });
 
+  it('підтримує обидві ролі та кілька статусів у пошуку тендерів', async () => {
+    await service.searchTenders({
+      edrpou: '12345678',
+      role: ['customer', 'supplier'],
+      status: ['active', 'complete'],
+    });
+
+    expect(prisma.tender.findMany).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { customerEdrpou: '12345678' },
+          {
+            contracts: {
+              some: { supplierEdrpou: '12345678' },
+            },
+          },
+        ],
+        status: {
+          in: ['active', 'complete'],
+        },
+      },
+      skip: 0,
+      take: 20,
+      orderBy: [{ dateModified: 'desc' }],
+      include: {
+        contracts: {
+          select: {
+            id: true,
+            contractID: true,
+            status: true,
+            amount: true,
+            supplierEdrpou: true,
+            supplierName: true,
+          },
+        },
+      },
+    });
+  });
+
   it('робить dateTo inclusive до кінця доби для тендерів і підтримує dateCreated як поле фільтрації', async () => {
     await service.searchTenders({
       dateType: 'dateCreated',
@@ -110,7 +149,7 @@ describe('SearchService', () => {
       },
       skip: 0,
       take: 20,
-      orderBy: { dateCreated: 'desc' },
+      orderBy: [{ dateCreated: 'desc' }],
       include: {
         contracts: {
           select: {
@@ -134,6 +173,79 @@ describe('SearchService', () => {
     });
   });
 
+  it('сортує тендери за датою публікації від новіших до старіших', async () => {
+    await service.searchTenders({
+      sort: 'dateCreatedDesc',
+    });
+
+    expect(prisma.tender.findMany).toHaveBeenCalledWith({
+      where: {},
+      skip: 0,
+      take: 20,
+      orderBy: [
+        { dateCreated: 'desc' },
+        { dateModified: 'desc' },
+      ],
+      include: {
+        contracts: {
+          select: {
+            id: true,
+            contractID: true,
+            status: true,
+            amount: true,
+            supplierEdrpou: true,
+            supplierName: true,
+          },
+        },
+      },
+    });
+  });
+
+  it('сортує тендери за сумою від менших до більших', async () => {
+    await service.searchTenders({
+      sort: 'amountAsc',
+    });
+
+    expect(prisma.tender.findMany).toHaveBeenCalledWith({
+      where: {},
+      skip: 0,
+      take: 20,
+      orderBy: [
+        { amount: 'asc' },
+        { dateCreated: 'desc' },
+      ],
+      include: {
+        contracts: {
+          select: {
+            id: true,
+            contractID: true,
+            status: true,
+            amount: true,
+            supplierEdrpou: true,
+            supplierName: true,
+          },
+        },
+      },
+    });
+  });
+
+  it('повертає реальну кількість контрактів для знайдених тендерів', async () => {
+    prisma.contract.count.mockResolvedValue(42);
+
+    await expect(service.searchTenders({})).resolves.toMatchObject({
+      total: 0,
+      relatedContractTotal: 42,
+      skip: 0,
+      take: 20,
+    });
+
+    expect(prisma.contract.count).toHaveBeenCalledWith({
+      where: {
+        tender: {},
+      },
+    });
+  });
+
   it('робить dateTo inclusive до кінця доби для контрактів', async () => {
     await service.searchContracts({
       dateType: 'dateSigned',
@@ -148,7 +260,7 @@ describe('SearchService', () => {
       },
       skip: 0,
       take: 20,
-      orderBy: { dateSigned: 'desc' },
+      orderBy: [{ dateSigned: 'desc' }],
       include: {
         tender: {
           select: {
@@ -167,6 +279,137 @@ describe('SearchService', () => {
         dateSigned: {
           lte: new Date('2026-03-08T23:59:59.999Z'),
         },
+      },
+    });
+  });
+
+  it('підтримує обидві ролі та кілька статусів у пошуку контрактів', async () => {
+    await service.searchContracts({
+      edrpou: '12345678',
+      role: ['supplier', 'customer'],
+      status: ['active', 'terminated'],
+    });
+
+    expect(prisma.contract.findMany).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { supplierEdrpou: '12345678' },
+          { tender: { customerEdrpou: '12345678' } },
+        ],
+        status: {
+          in: ['active', 'terminated'],
+        },
+      },
+      skip: 0,
+      take: 20,
+      orderBy: [{ dateSigned: 'desc' }],
+      include: {
+        tender: {
+          select: {
+            id: true,
+            tenderID: true,
+            title: true,
+            customerEdrpou: true,
+            customerName: true,
+            status: true,
+          },
+        },
+      },
+    });
+  });
+
+  it('сортує контракти за сумою у зростаючому порядку з fallback по новішій даті підписання', async () => {
+    await service.searchContracts({
+      sort: 'amountAsc',
+    });
+
+    expect(prisma.contract.findMany).toHaveBeenCalledWith({
+      where: {},
+      skip: 0,
+      take: 20,
+      orderBy: [
+        { amount: 'asc' },
+        { dateSigned: 'desc' },
+      ],
+      include: {
+        tender: {
+          select: {
+            id: true,
+            tenderID: true,
+            title: true,
+            customerEdrpou: true,
+            customerName: true,
+            status: true,
+          },
+        },
+      },
+    });
+  });
+
+  it('сортує контракти за датою підписання від старіших до новіших', async () => {
+    await service.searchContracts({
+      dateType: 'dateModified',
+      sort: 'dateSignedAsc',
+    });
+
+    expect(prisma.contract.findMany).toHaveBeenCalledWith({
+      where: {},
+      skip: 0,
+      take: 20,
+      orderBy: [
+        { dateSigned: 'asc' },
+        { dateModified: 'desc' },
+      ],
+      include: {
+        tender: {
+          select: {
+            id: true,
+            tenderID: true,
+            title: true,
+            customerEdrpou: true,
+            customerName: true,
+            status: true,
+          },
+        },
+      },
+    });
+  });
+
+  it('повертає реальну кількість унікальних тендерів для знайдених контрактів', async () => {
+    prisma.contract.findMany
+      .mockResolvedValueOnce([
+        {
+          id: 'contract-1',
+          contractID: 'C-1',
+          tenderId: 'tender-db-1',
+          tender: { tenderID: 'UA-1' },
+        },
+        {
+          id: 'contract-2',
+          contractID: 'C-2',
+          tenderId: 'tender-db-1',
+          tender: { tenderID: 'UA-1' },
+        },
+      ])
+      .mockResolvedValueOnce([
+        { tenderId: 'tender-db-1' },
+        { tenderId: 'tender-db-2' },
+        { tenderId: 'tender-db-3' },
+      ]);
+    prisma.contract.count.mockResolvedValue(17);
+
+    await expect(service.searchContracts({})).resolves.toMatchObject({
+      total: 17,
+      relatedTenderTotal: 3,
+      skip: 0,
+      take: 20,
+    });
+
+    expect(prisma.contract.findMany).toHaveBeenNthCalledWith(2, {
+      where: {},
+      distinct: ['tenderId'],
+      select: {
+        tenderId: true,
       },
     });
   });
