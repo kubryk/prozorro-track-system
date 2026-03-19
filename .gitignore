@@ -2,6 +2,10 @@ node_modules
 frontend/node_modules
 # Keep environment variables out of version control
 .env
+*.service-account.json
+*-service-account.json
+*google*.json
+prozorro-*.json
 
 /generated/prisma
 dist
