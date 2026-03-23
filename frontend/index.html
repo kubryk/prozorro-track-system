@@ -23,6 +23,9 @@
             <div class="header-logo">
                 <h1>Prozorro <span>Seraphim</span></h1>
             </div>
+            <div class="header-actions">
+                <button id="prompt-settings-btn" class="btn btn-ghost" type="button">AI промпти</button>
+            </div>
             <div id="stats-bar" class="stats-bar is-loading">
                 <div id="stats-loading" class="stats-loading" aria-hidden="true">
                     <span class="stats-spinner"></span>
@@ -50,7 +53,7 @@
             </div>
         </header>
 
-        <section class="search-section card glass">
+        <section id="search-section" class="search-section card glass">
             <div class="search-head">
                 <div class="search-type-toggle">
                     <button id="toggle-tenders" class="toggle-btn active" data-type="tenders">Тендери</button>
@@ -137,7 +140,7 @@
             </div>
         </section>
 
-        <section class="results-info">
+        <section id="results-info" class="results-info">
             <div class="results-summary">
                 <h2 id="results-count">Знайдено: 0</h2>
             </div>
@@ -162,6 +165,10 @@
                 <p>Введіть ЄДРПОУ для початку пошуку</p>
             </div>
         </section>
+
+        <section id="contract-detail-view" class="contract-detail-view hidden"></section>
+        <section id="audit-report-view" class="hidden"></section>
+        <section id="prompt-settings-view" class="prompt-settings-view hidden"></section>
 
         <footer class="pagination hidden" id="pagination">
             <button id="prev-btn" class="btn btn-secondary">Назад</button>

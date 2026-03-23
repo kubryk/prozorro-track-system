@@ -11,31 +11,31 @@ datasource db {
 }
 
 model Tender {
-  id           String        @id
-  tenderID     String?       // Public ID, e.g., UA-2025-01-01-000107-a
+  id           String    @id
+  tenderID     String? // Public ID, e.g., UA-2025-01-01-000107-a
   title        String?
   status       String?
-  amount                Float?
-  currency              String?
-  year             Int           // To filter by 2025/2026
-  dateModified     DateTime
-  dateCreated      DateTime?
-  
-  // Official Prozorro periods
-  tenderPeriodStart    DateTime?
-  tenderPeriodEnd      DateTime?
-  enquiryPeriodStart   DateTime?
-  enquiryPeriodEnd     DateTime?
-  auctionPeriodStart   DateTime?
-  awardPeriodStart     DateTime?
+  amount       Float?
+  currency     String?
+  year         Int // To filter by 2025/2026
+  dateModified DateTime
+  dateCreated  DateTime?
 
-  syncStatus       String        @default("FULL") // "FULL" or "PARTIAL"
-  
-  customerEdrpou   String?
-  customerName     String?
+  // Official Prozorro periods
+  tenderPeriodStart  DateTime?
+  tenderPeriodEnd    DateTime?
+  enquiryPeriodStart DateTime?
+  enquiryPeriodEnd   DateTime?
+  auctionPeriodStart DateTime?
+  awardPeriodStart   DateTime?
+
+  syncStatus String @default("FULL") // "FULL" or "PARTIAL"
+
+  customerEdrpou String?
+  customerName   String?
 
   // Relations
-  contracts        Contract[]
+  contracts Contract[]
 
   @@index([customerEdrpou])
   @@index([tenderID])
@@ -52,23 +52,26 @@ model Tender {
 }
 
 model Contract {
-  id                      String        @id
-  contractID              String?       // Public ID
-  status                  String?
-  amount                  Float?
-  currency                String?
-  valueAddedTaxIncluded   Boolean?
-  amountNet               Float?
-  dateSigned              DateTime?
-  date                    DateTime?
-  dateModified            DateTime?
-  dateCreated             DateTime?
+  id                    String    @id
+  contractID            String? // Public ID
+  status                String?
+  amount                Float?
+  currency              String?
+  valueAddedTaxIncluded Boolean?
+  amountNet             Float?
+  dateSigned            DateTime?
+  date                  DateTime?
+  dateModified          DateTime?
+  dateCreated           DateTime?
 
-  supplierEdrpou          String?
-  supplierName            String?
+  supplierEdrpou String?
+  supplierName   String?
 
-  tenderId                String
-  tender                  Tender        @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  tenderId       String
+  tender         Tender                  @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  extractionRuns ContractExtractionRun[]
+  aiExtractionRuns ContractAiExtractionRun[]
+  aiAuditRuns    ContractAiAuditRun[]
 
   @@index([supplierEdrpou])
   @@index([contractID])
@@ -78,10 +81,134 @@ model Contract {
   @@index([dateSigned])
 }
 
+model ContractExtractionRun {
+  id                 String    @id @default(cuid())
+  jobId              String?   @unique
+  state              String
+  error              String?
+  totalDocuments     Int?
+  relevantDocuments  Int?
+  processedDocuments Int?
+  createdAt          DateTime  @default(now())
+  startedAt          DateTime?
+  finishedAt         DateTime?
 
+  contractId String
+  contract   Contract                     @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  documents  ContractExtractionDocument[]
+
+  @@index([contractId, createdAt])
+  @@index([state])
+}
+
+model ContractExtractionDocument {
+  id              String   @id @default(cuid())
+  title           String
+  url             String
+  mimeType        String
+  matchedKeywords String[]
+  extractionMethod String?
+  extractedText   String?
+  candidatePages  Int[]
+  usage           Json?
+  error           String?
+  createdAt       DateTime @default(now())
+
+  extractionRunId String
+  extractionRun   ContractExtractionRun     @relation(fields: [extractionRunId], references: [id], onDelete: Cascade)
+  tables          ContractExtractionTable[]
+
+  @@index([extractionRunId])
+}
+
+model ContractExtractionTable {
+  id         String @id @default(cuid())
+  page       Int
+  confidence Float?
+  headers    Json
+
+  documentId String
+  document   ContractExtractionDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  lines      ContractExtractionLine[]
+
+  @@index([documentId])
+}
+
+model ContractExtractionLine {
+  id         String  @id @default(cuid())
+  rowIndex   Int
+  cells      Json
+  itemName   String?
+  quantity   Float?
+  unit       String?
+  unitPrice  Float?
+  totalPrice Float?
+  vat        String?
+  currency   String?
+
+  tableId String
+  table   ContractExtractionTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+
+  @@index([tableId])
+}
+
+model ContractAiExtractionRun {
+  id                String   @id @default(cuid())
+  state             String
+  error             String?
+  model             String
+  documentsAnalyzed Int?
+  itemsExtracted    Int?
+  sourceTextLength  Int?
+  items             Json?
+  usage             Json?
+  rawResponse       Json?
+  createdAt         DateTime @default(now())
+  startedAt         DateTime?
+  finishedAt        DateTime?
+
+  contractId String
+  contract   Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  @@index([contractId, createdAt])
+  @@index([state])
+}
+
+model ContractAiAuditRun {
+  id               String   @id @default(cuid())
+  state            String
+  error            String?
+  model            String
+  itemsAudited     Int?
+  flaggedItemsCount Int?
+  overallRiskLevel String?
+  overallScore     Float?
+  summary          String?
+  items            Json?
+  searchQueries    Json?
+  sources          Json?
+  usage            Json?
+  rawResponse      Json?
+  createdAt        DateTime @default(now())
+  startedAt        DateTime?
+  finishedAt       DateTime?
+
+  contractId String
+  contract   Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  @@index([contractId, createdAt])
+  @@index([state])
+}
+
+model PromptTemplate {
+  key       String   @id
+  content   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
 
 model SyncState {
-  id          Int      @id @default(1)
-  lastOffset  String?
-  updatedAt   DateTime @updatedAt
+  id         Int      @id @default(1)
+  lastOffset String?
+  updatedAt  DateTime @updatedAt
 }

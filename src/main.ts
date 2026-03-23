@@ -24,9 +24,15 @@ async function bootstrap() {
 
   const config = new DocumentBuilder()
     .setTitle('Prozorro Track System API')
-    .setDescription('The Prozorro System Tracker API description')
+    .setDescription(
+      'API для пошуку тендерів і контрактів, запуску аналізу документів, AI-витягу позицій, AI-аудиту та отримання usage/cost telemetry.',
+    )
     .setVersion('1.0')
-    .addTag('search')
+    .addTag('app', 'Службові маршрути API')
+    .addTag('search', 'Пошук тендерів, контрактів і агрегована статистика')
+    .addTag('prompt-settings', 'Редаговані AI промпти для extraction та audit pipeline')
+    .addTag('contract-analysis', 'Запуск аналізу контракту, статуси, деталі, AI витяг та аудит')
+    .addTag('contract-usage', 'Токени, OCR сторінки та estimated cost по контракту')
     .addApiKey({ type: 'apiKey', name: 'X-API-KEY', in: 'header' }, 'api-key')
     .build();
 

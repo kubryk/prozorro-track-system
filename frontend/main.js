@@ -1,9 +1,14 @@
 import axios from 'axios';
 
 const API_BASE = 'http://localhost:3000/search';
+const EXTRACTION_API_BASE = 'http://localhost:3000/contract-extractions';
 const API_KEY = 'your_secure_api_key_for_bot_and_dashboard';
 const TAKE = 20;
 const EDRPOU_PATTERN = /^\d{8}(\d{2})?$/;
+const extractionCache = new Map();
+const contractDetailCache = new Map();
+const contractAuditReportCache = new Map();
+const DETAIL_SECTION_STORAGE_PREFIX = 'contract-detail-section';
 
 const TYPE_CONFIG = {
     tenders: {
@@ -73,8 +78,16 @@ const TYPE_CONFIG = {
 let currentType = 'tenders';
 let currentPage = 0;
 let hasSearched = false;
+let detailAutoRefreshTimer = null;
+let detailAutoRefreshContractRef = '';
+let promptSettingsState = [];
+let promptSettingsLoaded = false;
+let promptSettingsSaving = false;
+let promptSettingsStatusMessage = '';
+let promptSettingsStatusType = '';
 
 const els = {
+    appContainer: document.querySelector('.app-container'),
     edrpou: document.getElementById('edrpou'),
     role: document.getElementById('role'),
     roleSelect: document.getElementById('role-select'),
@@ -91,7 +104,12 @@ const els = {
     searchBtn: document.getElementById('search-btn'),
     clearFilters: document.getElementById('clear-filters'),
     activeFilters: document.getElementById('active-filters'),
+    searchSection: document.getElementById('search-section'),
+    resultsInfo: document.getElementById('results-info'),
     resultsGrid: document.getElementById('results-grid'),
+    contractDetailView: document.getElementById('contract-detail-view'),
+    auditReportView: document.getElementById('audit-report-view'),
+    promptSettingsView: document.getElementById('prompt-settings-view'),
     resultsCount: document.getElementById('results-count'),
     loading: document.getElementById('loading'),
     pagination: document.getElementById('pagination'),
@@ -105,6 +123,7 @@ const els = {
     statTenders: document.getElementById('stat-tenders'),
     statContracts: document.getElementById('stat-contracts'),
     lastSync: document.getElementById('last-sync'),
+    promptSettingsBtn: document.getElementById('prompt-settings-btn'),
 };
 
 function init() {
@@ -112,9 +131,14 @@ function init() {
     setupEventListeners();
     renderActiveFilters();
     fetchStats();
+    handleRoute();
 }
 
 function setupEventListeners() {
+    window.addEventListener('hashchange', handleRoute);
+
+    els.promptSettingsBtn?.addEventListener('click', openPromptSettingsRoute);
+
     els.searchBtn.addEventListener('click', () => {
         currentPage = 0;
         performSearch();
@@ -178,6 +202,154 @@ function setupEventListeners() {
         }
     });
 
+    els.resultsGrid.addEventListener('click', async (event) => {
+        const contractOpenButton = event.target.closest('[data-contract-open]');
+        if (contractOpenButton) {
+            const contractRef = contractOpenButton.dataset.contractOpen;
+            if (contractRef) {
+                openContractDetailRoute(contractRef);
+            }
+            return;
+        }
+
+        const toggleButton = event.target.closest('[data-extraction-toggle]');
+        if (toggleButton) {
+            const contractRef = toggleButton.dataset.extractionToggle;
+            if (contractRef) {
+                await handleExtractionToggle(contractRef);
+            }
+            return;
+        }
+
+        const runButton = event.target.closest('[data-extraction-run]');
+        if (runButton) {
+            const contractRef = runButton.dataset.extractionRun;
+            if (contractRef) {
+                await handleExtractionRun(contractRef);
+            }
+            return;
+        }
+
+        const refreshButton = event.target.closest('[data-extraction-refresh]');
+        if (refreshButton) {
+            const contractRef = refreshButton.dataset.extractionRefresh;
+            if (contractRef) {
+                await fetchAndRenderExtraction(contractRef, { forceRefresh: true, openPanel: true });
+            }
+        }
+    });
+
+    els.contractDetailView.addEventListener('click', async (event) => {
+        const backButton = event.target.closest('[data-back-to-results]');
+        if (backButton) {
+            closeContractDetailRoute();
+            return;
+        }
+
+        const toggleSectionButton = event.target.closest('[data-detail-section-toggle]');
+        if (toggleSectionButton) {
+            handleDetailSectionToggle(toggleSectionButton);
+            return;
+        }
+
+        const runButton = event.target.closest('[data-detail-extraction-run]');
+        if (runButton) {
+            const contractRef = runButton.dataset.detailExtractionRun;
+            if (contractRef) {
+                await runDetailExtraction(contractRef);
+            }
+            return;
+        }
+
+        const refreshButton = event.target.closest('[data-detail-extraction-refresh]');
+        if (refreshButton) {
+            const contractRef = refreshButton.dataset.detailExtractionRefresh;
+            if (contractRef) {
+                await renderContractDetailPage(contractRef, { forceRefresh: true });
+            }
+            return;
+        }
+
+        const aiRefreshButton = event.target.closest('[data-detail-ai-refresh]');
+        if (aiRefreshButton) {
+            const contractRef = aiRefreshButton.dataset.detailAiRefresh;
+            if (contractRef) {
+                await renderContractDetailPage(contractRef, { forceRefresh: true });
+            }
+            return;
+        }
+
+        const aiAuditRefreshButton = event.target.closest('[data-detail-ai-audit-refresh]');
+        if (aiAuditRefreshButton) {
+            const contractRef = aiAuditRefreshButton.dataset.detailAiAuditRefresh;
+            if (contractRef) {
+                await renderContractDetailPage(contractRef, { forceRefresh: true });
+            }
+            return;
+        }
+
+        const reportButton = event.target.closest('[data-open-audit-report]');
+        if (reportButton) {
+            const contractRef = reportButton.dataset.openAuditReport;
+            if (contractRef) {
+                openContractAuditReportRoute(contractRef);
+            }
+            return;
+        }
+    });
+
+    els.auditReportView?.addEventListener('click', async (event) => {
+        const backButton = event.target.closest('[data-back-to-contract]');
+        if (backButton) {
+            const contractRef = backButton.dataset.backToContract;
+            if (contractRef) {
+                openContractDetailRouteInline(contractRef);
+            } else {
+                closeContractDetailRoute();
+            }
+            return;
+        }
+
+        const refreshButton = event.target.closest('[data-audit-report-refresh]');
+        if (refreshButton) {
+            const contractRef = refreshButton.dataset.auditReportRefresh;
+            if (contractRef) {
+                await renderContractAuditReportPage(contractRef, { forceRefresh: true });
+            }
+        }
+    });
+
+    els.promptSettingsView?.addEventListener('click', async (event) => {
+        const backButton = event.target.closest('[data-back-from-prompts]');
+        if (backButton) {
+            closePromptSettingsRoute();
+            return;
+        }
+
+        const saveButton = event.target.closest('[data-prompt-save]');
+        if (saveButton) {
+            await savePromptSettings();
+            return;
+        }
+
+        const saveSingleButton = event.target.closest('[data-prompt-save-single]');
+        if (saveSingleButton) {
+            await savePromptSettings([saveSingleButton.dataset.promptSaveSingle]);
+            return;
+        }
+
+        const resetAllButton = event.target.closest('[data-prompt-reset-all]');
+        if (resetAllButton) {
+            resetAllPromptSettingsToDefault();
+            return;
+        }
+
+        const restoreTrigger = event.target.closest('[data-prompt-reset]');
+        if (restoreTrigger) {
+            restorePromptSettingToDefault(restoreTrigger.dataset.promptReset);
+        }
+    });
+
     [
         els.edrpou,
         els.dateFrom,
@@ -227,6 +399,107 @@ function switchType(type) {
     }
 }
 
+function handleRoute() {
+    if (isPromptSettingsRoute()) {
+        setAppMode('prompt-settings');
+        renderPromptSettingsPage({ loading: !promptSettingsLoaded });
+        if (!promptSettingsLoaded) {
+            void loadPromptSettings();
+        }
+        return;
+    }
+
+    const reportContractRef = getContractAuditReportRefFromRoute();
+
+    if (reportContractRef) {
+        setAppMode('audit-report');
+        renderContractAuditReportPage(reportContractRef);
+        return;
+    }
+
+    const contractRef = getContractRefFromRoute();
+
+    if (contractRef) {
+        setAppMode('contract-detail');
+        renderContractDetailPage(contractRef);
+        return;
+    }
+
+    setAppMode('search');
+}
+
+function getContractRefFromRoute() {
+    const normalizedHash = window.location.hash.replace(/^#\/?/, '');
+
+    if (!normalizedHash.startsWith('contract/')) {
+        return '';
+    }
+
+    return decodeURIComponent(normalizedHash.slice('contract/'.length));
+}
+
+function getContractAuditReportRefFromRoute() {
+    const normalizedHash = window.location.hash.replace(/^#\/?/, '');
+
+    if (!normalizedHash.startsWith('contract-report/')) {
+        return '';
+    }
+
+    return decodeURIComponent(normalizedHash.slice('contract-report/'.length));
+}
+
+function isPromptSettingsRoute() {
+    const normalizedHash = window.location.hash.replace(/^#\/?/, '');
+    return normalizedHash === 'prompt-settings';
+}
+
+function openContractDetailRoute(contractRef) {
+    const targetHash = `#contract/${encodeURIComponent(contractRef)}`;
+    const targetUrl = `${window.location.pathname}${window.location.search}${targetHash}`;
+    window.open(targetUrl, '_blank', 'noopener');
+}
+
+function openContractDetailRouteInline(contractRef) {
+    window.location.hash = `#contract/${encodeURIComponent(contractRef)}`;
+}
+
+function openContractAuditReportRoute(contractRef) {
+    window.location.hash = `#contract-report/${encodeURIComponent(contractRef)}`;
+}
+
+function closeContractDetailRoute() {
+    history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+    handleRoute();
+}
+
+function openPromptSettingsRoute() {
+    window.location.hash = '#prompt-settings';
+}
+
+function closePromptSettingsRoute() {
+    history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+    handleRoute();
+}
+
+function setAppMode(mode) {
+    const showDetail = mode !== 'search';
+
+    if (mode !== 'contract-detail') {
+        clearDetailAutoRefresh();
+    }
+
+    els.appContainer?.classList.toggle('detail-mode', showDetail);
+    els.appContainer?.classList.toggle('plain-report-mode', mode === 'audit-report');
+    document.body.classList.toggle('plain-report-mode', mode === 'audit-report');
+    els.searchSection.classList.toggle('hidden', showDetail);
+    els.resultsInfo.classList.toggle('hidden', showDetail);
+    els.resultsGrid.classList.toggle('hidden', showDetail);
+    els.pagination.classList.toggle('hidden', showDetail || !hasSearched);
+    els.contractDetailView.classList.toggle('hidden', mode !== 'contract-detail');
+    els.auditReportView.classList.toggle('hidden', mode !== 'audit-report');
+    els.promptSettingsView.classList.toggle('hidden', mode !== 'prompt-settings');
+}
+
 function applyTypeConfig(type, { forceReset = false } = {}) {
     const config = TYPE_CONFIG[type];
 
@@ -264,6 +537,308 @@ function renderChoiceButtons(container, options, group) {
             data-value="${escapeHtml(option.value)}"
         >${escapeHtml(option.label)}</button>
     `).join('');
+}
+
+async function loadPromptSettings({ forceRefresh = false } = {}) {
+    if (promptSettingsLoaded && !forceRefresh) {
+        renderPromptSettingsPage();
+        return;
+    }
+
+    setPromptSettingsStatus('Завантажую промпти...', 'loading');
+    renderPromptSettingsPage({ loading: true });
+
+    try {
+        const response = await axios.get(`${EXTRACTION_API_BASE}/prompt-settings`, {
+            headers: {
+                'X-API-KEY': API_KEY,
+            },
+        });
+
+        promptSettingsState = Array.isArray(response?.data?.templates)
+            ? response.data.templates
+            : [];
+        promptSettingsLoaded = true;
+        setPromptSettingsStatus('', '');
+        renderPromptSettingsPage();
+    } catch (error) {
+        const message = error?.response?.data?.message || error?.message || 'Не вдалося завантажити AI промпти';
+        setPromptSettingsStatus(message, 'error');
+        renderPromptSettingsPage();
+    }
+}
+
+function renderPromptSettingsPage({ loading = false } = {}) {
+    const contentHtml = loading
+        ? `
+            <div class="document-extraction-loading">
+                <span class="inline-spinner"></span>
+                <span>Завантажую шаблони промптів...</span>
+            </div>
+        `
+        : createPromptSettingsGroupsHtml();
+
+    els.promptSettingsView.innerHTML = `
+        <div class="contract-detail-shell glass prompt-settings-shell">
+            <div class="contract-detail-head">
+                <button type="button" class="btn btn-secondary btn-sm" data-back-from-prompts>Назад</button>
+            </div>
+            <div class="prompt-settings-page-head">
+                <div>
+                    <h2>AI промпти</h2>
+                    <p>Глобальні шаблони для витягу позицій і аудиту договорів.</p>
+                </div>
+            </div>
+            ${createPromptSettingsStatusHtml()}
+            <div id="prompt-settings-list" class="prompt-settings-list">
+                ${contentHtml}
+            </div>
+            <div class="prompt-settings-footer">
+                <button class="btn btn-ghost" type="button" data-prompt-reset-all>Скинути все до стандарту</button>
+            </div>
+        </div>
+    `;
+}
+
+function createPromptSettingsGroupsHtml() {
+    const groups = new Map();
+
+    promptSettingsState.forEach((template) => {
+        const group = template?.group || 'Інше';
+        const templates = groups.get(group) || [];
+        templates.push(template);
+        groups.set(group, templates);
+    });
+
+    return [...groups.entries()].map(([group, templates]) => `
+        <section class="prompt-settings-group">
+            <h3>${escapeHtml(group)}</h3>
+            <div class="prompt-settings-group-list">
+                ${createPromptTemplatePairsHtml(templates)}
+            </div>
+        </section>
+    `).join('');
+}
+
+function createPromptTemplatePairsHtml(templates) {
+    const pairs = new Map();
+    const order = [];
+
+    templates.forEach((template) => {
+        const pairKey = getPromptTemplatePairKey(template.key);
+
+        if (!pairs.has(pairKey)) {
+            pairs.set(pairKey, {});
+            order.push(pairKey);
+        }
+
+        const pair = pairs.get(pairKey);
+        const role = getPromptTemplateRole(template.key);
+
+        if (role === 'system' || role === 'user') {
+            pair[role] = template;
+        } else {
+            pair.single = template;
+        }
+    });
+
+    return order.map((pairKey) => {
+        const pair = pairs.get(pairKey);
+
+        if (!pair) {
+            return '';
+        }
+
+        if (pair.single) {
+            return `
+                <div class="prompt-template-pair prompt-template-pair-single">
+                    ${createPromptTemplateHtml(pair.single)}
+                </div>
+            `;
+        }
+
+        return `
+            <div class="prompt-template-pair" data-prompt-pair="${escapeHtml(pairKey)}">
+                ${pair.system ? createPromptTemplateHtml(pair.system, { role: 'system' }) : ''}
+                ${pair.user ? createPromptTemplateHtml(pair.user, { role: 'user' }) : ''}
+            </div>
+        `;
+    }).join('');
+}
+
+function createPromptSettingsStatusHtml() {
+    if (!promptSettingsStatusMessage) {
+        return '';
+    }
+
+    return `
+        <div class="prompt-settings-status prompt-settings-status-${escapeHtml(promptSettingsStatusType || 'info')}">
+            ${escapeHtml(promptSettingsStatusMessage)}
+        </div>
+    `;
+}
+
+function createPromptTemplateHtml(template, options = {}) {
+    const role = options.role || getPromptTemplateRole(template?.key);
+    const placeholders = Array.isArray(template?.placeholders) ? template.placeholders : [];
+    const roleLabel = role === 'system' ? 'System' : role === 'user' ? 'User' : null;
+    const title = roleLabel || template.label || template.key;
+
+    return `
+        <article class="prompt-template-card" data-prompt-key="${escapeHtml(template.key)}">
+            <div class="prompt-template-toolbar">
+                <button type="button" class="btn btn-ghost btn-sm" data-prompt-reset="${escapeHtml(template.key)}">Стандартний</button>
+            </div>
+            <div class="prompt-template-head">
+                <h4>${escapeHtml(title)}</h4>
+                <p>${escapeHtml(template.description || '')}</p>
+            </div>
+            ${placeholders.length > 0 ? `
+                <div class="prompt-template-placeholders">
+                    ${placeholders.map((placeholder) => `<span class="header-chip">${escapeHtml(placeholder)}</span>`).join('')}
+                </div>
+            ` : ''}
+            <textarea class="prompt-template-textarea" data-prompt-textarea="${escapeHtml(template.key)}">${escapeHtmlTextarea(template.value || '')}</textarea>
+            <div class="prompt-template-footer">
+                <button type="button" class="btn btn-primary btn-sm" data-prompt-save-single="${escapeHtml(template.key)}" ${promptSettingsSaving ? 'disabled' : ''}>Зберегти</button>
+            </div>
+        </article>
+    `;
+}
+
+function getPromptTemplateRole(key) {
+    if (typeof key !== 'string') {
+        return null;
+    }
+
+    if (key.endsWith('_system')) {
+        return 'system';
+    }
+
+    if (key.endsWith('_user')) {
+        return 'user';
+    }
+
+    return null;
+}
+
+function getPromptTemplatePairKey(key) {
+    if (typeof key !== 'string') {
+        return 'other';
+    }
+
+    return key.replace(/_(system|user)$/, '');
+}
+
+function restorePromptSettingToDefault(key) {
+    const template = promptSettingsState.find((item) => item.key === key);
+    const textarea = els.promptSettingsView.querySelector(`[data-prompt-textarea="${CSS.escape(key)}"]`);
+
+    if (!template || !textarea) {
+        return;
+    }
+
+    textarea.value = template.defaultValue || '';
+    setPromptSettingsStatus('Шаблон повернуто до стандартного значення. Не забудь зберегти.', 'info');
+}
+
+function resetAllPromptSettingsToDefault() {
+    promptSettingsState.forEach((template) => {
+        const textarea = els.promptSettingsView.querySelector(
+            `[data-prompt-textarea="${CSS.escape(template.key)}"]`,
+        );
+
+        if (textarea) {
+            textarea.value = template.defaultValue || '';
+        }
+    });
+
+    setPromptSettingsStatus('Усі промпти повернуті до стандартних значень. Не забудь зберегти.', 'info');
+}
+
+async function savePromptSettings(keys = null) {
+    if (promptSettingsSaving) {
+        return;
+    }
+
+    const keysSet = Array.isArray(keys) && keys.length > 0
+        ? new Set(keys.filter((key) => typeof key === 'string' && key.length > 0))
+        : null;
+
+    const templates = promptSettingsState
+    .filter((template) => !keysSet || keysSet.has(template.key))
+    .map((template) => {
+        const textarea = els.promptSettingsView.querySelector(
+            `[data-prompt-textarea="${CSS.escape(template.key)}"]`,
+        );
+        const content = typeof textarea?.value === 'string' ? textarea.value : template.value || '';
+        const normalizedContent = content.trim();
+        const normalizedDefault = typeof template.defaultValue === 'string' ? template.defaultValue.trim() : '';
+
+        return {
+            key: template.key,
+            content,
+            reset: normalizedContent === normalizedDefault,
+        };
+    });
+
+    if (!templates.length) {
+        return;
+    }
+
+    promptSettingsState = promptSettingsState.map((template) => {
+        const nextTemplate = templates.find((item) => item.key === template.key);
+
+        return nextTemplate
+            ? {
+                ...template,
+                value: nextTemplate.content,
+                isCustom: !nextTemplate.reset,
+            }
+            : template;
+    });
+
+    promptSettingsSaving = true;
+    const isSingleSave = templates.length === 1;
+    setPromptSettingsStatus(
+        isSingleSave ? 'Зберігаю промпт...' : 'Зберігаю промпти...',
+        'loading',
+    );
+    renderPromptSettingsPage();
+
+    try {
+        const response = await axios.put(
+            `${EXTRACTION_API_BASE}/prompt-settings`,
+            { templates },
+            {
+                headers: {
+                    'X-API-KEY': API_KEY,
+                },
+            },
+        );
+
+        promptSettingsState = Array.isArray(response?.data?.templates)
+            ? response.data.templates
+            : promptSettingsState;
+        promptSettingsLoaded = true;
+        setPromptSettingsStatus(
+            isSingleSave ? 'Промпт збережено.' : 'Промпти збережено.',
+            'success',
+        );
+        renderPromptSettingsPage();
+    } catch (error) {
+        const message = error?.response?.data?.message || error?.message || 'Не вдалося зберегти AI промпти';
+        setPromptSettingsStatus(message, 'error');
+        renderPromptSettingsPage();
+    } finally {
+        promptSettingsSaving = false;
+        renderPromptSettingsPage();
+    }
+}
+
+function setPromptSettingsStatus(message, type) {
+    promptSettingsStatusMessage = message || '';
+    promptSettingsStatusType = type || '';
 }
 
 function handleChoiceClick(event) {
@@ -663,6 +1238,7 @@ function buildResultsCount(payload, total) {
 function createCard(item) {
     const isContract = currentType === 'contracts';
     const id = isContract ? item.contractID : item.tenderID;
+    const contractRef = isContract ? item.id : null;
     const title = isContract ? item.tender?.title || 'Без назви' : item.title || 'Без назви';
     const customerName = isContract ? item.tender?.customerName : item.customerName;
     const customerEdrpou = isContract ? item.tender?.customerEdrpou : item.customerEdrpou;
@@ -675,7 +1251,7 @@ function createCard(item) {
         : createTenderDetails(item, customerName, customerEdrpou);
 
     return `
-        <article class="result-card glass">
+        <article class="result-card glass" ${isContract ? `data-contract-card="${escapeHtml(contractRef || '')}"` : ''}>
             <div class="card-header">
                 <div>
                     <span class="tender-id">${escapeHtml(id || '—')}</span>
@@ -684,19 +1260,50 @@ function createCard(item) {
             </div>
             <h3 class="card-title">${escapeHtml(title)}</h3>
             ${detailsHtml}
+            ${isContract ? createExtractionBlock(contractRef) : ''}
             <div class="card-footer">
                 <div class="amount">
                     ${amount}
                     <span class="amount-currency">${escapeHtml(currency)}</span>
                 </div>
-                <a
-                    href="${escapeHtml(getExternalLink(isContract, id))}"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    class="btn btn-secondary btn-sm"
-                >На Prozorro</a>
+                <div class="card-actions">
+                    ${isContract ? `
+                        <button
+                            type="button"
+                            class="btn btn-primary btn-sm"
+                            data-contract-open="${escapeHtml(contractRef || '')}"
+                        >Сторінка контракту</button>
+                        <button
+                            type="button"
+                            class="btn btn-secondary btn-sm"
+                            data-extraction-toggle="${escapeHtml(contractRef || '')}"
+                        >Документи</button>
+                    ` : ''}
+                    <a
+                        href="${escapeHtml(getExternalLink(isContract, id))}"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        class="btn btn-secondary btn-sm"
+                    >На Prozorro</a>
+                </div>
             </div>
         </article>
+    `;
+}
+
+function createExtractionBlock(contractRef) {
+    if (!contractRef) {
+        return '';
+    }
+
+    return `
+        <section class="document-extraction hidden" data-extraction-panel="${escapeHtml(contractRef)}">
+            <div class="document-extraction-body">
+                <div class="document-extraction-empty">
+                    Натисни "Документи", щоб переглянути витяг із договору.
+                </div>
+            </div>
+        </section>
     `;
 }
 
@@ -806,6 +1413,1642 @@ function showLoading(show) {
     els.resultsGrid.style.opacity = show ? '0.5' : '1';
 }
 
+async function handleExtractionToggle(contractRef) {
+    const panel = getExtractionPanel(contractRef);
+    if (!panel) {
+        return;
+    }
+
+    const willOpen = panel.classList.contains('hidden');
+
+    document.querySelectorAll('[data-extraction-panel]').forEach((element) => {
+        if (element.dataset.extractionPanel !== contractRef) {
+            element.classList.add('hidden');
+        }
+    });
+
+    if (!willOpen) {
+        panel.classList.add('hidden');
+        return;
+    }
+
+    panel.classList.remove('hidden');
+
+    const cached = extractionCache.get(contractRef);
+    if (cached?.resultHtml && !cached.needsRefresh) {
+        renderExtractionHtml(contractRef, cached.resultHtml);
+        return;
+    }
+
+    await fetchAndRenderExtraction(contractRef, { openPanel: true });
+}
+
+async function handleExtractionRun(contractRef) {
+    setExtractionLoading(contractRef, 'Запускаю повний аналіз документів...');
+
+    try {
+        const response = await axios.post(
+            `${EXTRACTION_API_BASE}/contracts/${encodeURIComponent(contractRef)}/run`,
+            {},
+            {
+                headers: {
+                    'X-API-KEY': API_KEY,
+                },
+            },
+        );
+
+        contractAuditReportCache.delete(contractRef);
+        contractDetailCache.delete(contractRef);
+
+        extractionCache.set(contractRef, {
+            ...(extractionCache.get(contractRef) || {}),
+            status: response.data,
+            needsRefresh: true,
+        });
+
+        renderExtractionStatus(contractRef, response.data);
+    } catch (error) {
+        renderExtractionError(contractRef, error);
+    }
+}
+
+async function fetchAndRenderExtraction(contractRef, { forceRefresh = false, openPanel = false } = {}) {
+    const cached = extractionCache.get(contractRef);
+
+    if (!forceRefresh && cached?.status && !cached.needsRefresh) {
+        renderExtractionStatus(contractRef, cached.status);
+        return;
+    }
+
+    setExtractionLoading(contractRef, 'Завантажую статус аналізу документів...');
+
+    try {
+        const response = await axios.get(
+            `${EXTRACTION_API_BASE}/contracts/${encodeURIComponent(contractRef)}/status`,
+            {
+                headers: {
+                    'X-API-KEY': API_KEY,
+                },
+            },
+        );
+
+        extractionCache.set(contractRef, {
+            status: response.data,
+            resultHtml: null,
+            needsRefresh: ['queued', 'waiting', 'active', 'processing', 'delayed'].includes(response.data?.state),
+        });
+
+        if (openPanel) {
+            getExtractionPanel(contractRef)?.classList.remove('hidden');
+        }
+
+        renderExtractionStatus(contractRef, response.data);
+    } catch (error) {
+        renderExtractionError(contractRef, error);
+    }
+}
+
+function renderExtractionStatus(contractRef, status) {
+    const html = buildExtractionStatusHtml(contractRef, status);
+
+    extractionCache.set(contractRef, {
+        ...(extractionCache.get(contractRef) || {}),
+        status,
+        resultHtml: html,
+        needsRefresh: ['queued', 'waiting', 'active', 'processing', 'delayed'].includes(status?.state),
+    });
+
+    renderExtractionHtml(contractRef, html);
+}
+
+function buildExtractionStatusHtml(contractRef, status) {
+    if (!status) {
+        return `
+            <div class="document-extraction-empty">
+                Дані про витяг недоступні.
+            </div>
+        `;
+    }
+
+    const state = status.state || 'idle';
+    const result = status.result;
+
+    if (state === 'idle') {
+        return `
+            <div class="document-extraction-head">
+                <div>
+                    <span class="detail-label">Витяг з документів</span>
+                    <p class="document-extraction-meta">Ще не запускався для цього контракту.</p>
+                </div>
+                <button type="button" class="btn btn-primary btn-sm" data-extraction-run="${escapeHtml(contractRef)}">Запустити аналіз</button>
+            </div>
+        `;
+    }
+
+    if (['queued', 'waiting', 'active', 'processing', 'delayed'].includes(state)) {
+        return `
+            <div class="document-extraction-head">
+                <div>
+                    <span class="detail-label">Витяг з документів</span>
+                    <p class="document-extraction-meta">Обробка триває. Онови стан через кілька секунд.</p>
+                </div>
+                <button type="button" class="btn btn-secondary btn-sm" data-extraction-refresh="${escapeHtml(contractRef)}">Оновити</button>
+            </div>
+            <div class="document-extraction-loading">
+                <span class="inline-spinner"></span>
+                <span>${escapeHtml(getExtractionStateLabel(state))}</span>
+            </div>
+        `;
+    }
+
+    if (state === 'failed') {
+        return `
+            <div class="document-extraction-head">
+                <div>
+                    <span class="detail-label">Витяг з документів</span>
+                    <p class="document-extraction-meta document-extraction-error">${escapeHtml(status.failureReason || 'Не вдалося обробити документ')}</p>
+                </div>
+                <div class="document-extraction-actions">
+                    <button type="button" class="btn btn-secondary btn-sm" data-extraction-refresh="${escapeHtml(contractRef)}">Оновити</button>
+                    <button type="button" class="btn btn-primary btn-sm" data-extraction-run="${escapeHtml(contractRef)}">Запустити аналіз ще раз</button>
+                </div>
+            </div>
+        `;
+    }
+
+    const documents = Array.isArray(result?.documents) ? result.documents : [];
+    const documentsWithText = documents.filter((document) => typeof document?.extractedText === 'string' && document.extractedText.trim().length > 0).length;
+    const documentsHtml = documents.length > 0
+        ? documents.map((document) => createExtractedDocumentHtml(document)).join('')
+        : `<div class="document-extraction-empty">Не знайшов витягнутих даних для цього контракту.</div>`;
+
+    return `
+        <div class="document-extraction-head">
+            <div>
+                <span class="detail-label">Витяг з документів</span>
+                <p class="document-extraction-meta">
+                    Оброблено ${formatNumber(result?.processedDocuments || 0)} документів з ${formatNumber(result?.relevantDocuments || 0)} релевантних.
+                </p>
+                <p class="document-extraction-meta">
+                    Текст знайдено у ${formatNumber(documentsWithText)} документах. Після цього AI автоматично запускає витяг позицій і аудит.
+                </p>
+            </div>
+            <div class="document-extraction-actions">
+                <button type="button" class="btn btn-secondary btn-sm" data-extraction-refresh="${escapeHtml(contractRef)}">Оновити</button>
+                <button type="button" class="btn btn-primary btn-sm" data-extraction-run="${escapeHtml(contractRef)}">Перезапустити аналіз</button>
+            </div>
+        </div>
+        <div class="document-extraction-docs">
+            ${documentsHtml}
+        </div>
+    `;
+}
+
+function normalizeDocumentMatchValue(value) {
+    return String(value || '').trim().toLowerCase();
+}
+
+function mergeContractDocuments(sourceDocuments, extractedDocuments) {
+    const usedExtractedDocuments = new Set();
+
+    const merged = sourceDocuments.map((sourceDocument) => {
+        const sourceUrl = normalizeDocumentMatchValue(sourceDocument?.url);
+        const sourceTitle = normalizeDocumentMatchValue(sourceDocument?.title);
+
+        const extractedDocument = extractedDocuments.find((candidate) => {
+            if (usedExtractedDocuments.has(candidate)) {
+                return false;
+            }
+
+            const candidateUrl = normalizeDocumentMatchValue(candidate?.url);
+            const candidateTitle = normalizeDocumentMatchValue(candidate?.title);
+
+            return (sourceUrl && candidateUrl && sourceUrl === candidateUrl)
+                || (sourceTitle && candidateTitle && sourceTitle === candidateTitle);
+        }) || null;
+
+        if (extractedDocument) {
+            usedExtractedDocuments.add(extractedDocument);
+        }
+
+        return { sourceDocument, extractedDocument };
+    });
+
+    const extractionOnlyDocuments = extractedDocuments
+        .filter((document) => !usedExtractedDocuments.has(document))
+        .map((extractedDocument) => ({ sourceDocument: null, extractedDocument }));
+
+    return [...merged, ...extractionOnlyDocuments];
+}
+
+function createContractDocumentHtml({ sourceDocument, extractedDocument }, extractionState) {
+    const title = sourceDocument?.title || extractedDocument?.title || 'Документ';
+    const url = sourceDocument?.url || extractedDocument?.url || '#';
+    const documentMetaParts = [
+        sourceDocument?.format || sourceDocument?.documentType || extractedDocument?.mimeType || '',
+        sourceDocument?.datePublished ? `Опубліковано: ${formatDateTime(sourceDocument.datePublished)}` : '',
+    ].filter(Boolean).join(' · ');
+    const extractedText = typeof extractedDocument?.extractedText === 'string' ? extractedDocument.extractedText.trim() : '';
+    const extractionMethod = extractedDocument?.extractionMethod ? getDocumentExtractionMethodLabel(extractedDocument.extractionMethod) : null;
+    const isExtractionRunning = ['queued', 'waiting', 'active', 'processing', 'delayed'].includes(extractionState);
+
+    let statusBadgeHtml = '<span class="badge badge-muted">Без витягу</span>';
+    if (isExtractionRunning && !extractedDocument) {
+        statusBadgeHtml = '<span class="badge badge-active">В обробці</span>';
+    } else if (extractedDocument?.error) {
+        statusBadgeHtml = '<span class="badge badge-unsuccessful">Помилка</span>';
+    } else if (extractionMethod) {
+        statusBadgeHtml = `<span class="badge badge-${getDocumentExtractionMethodBadgeClass(extractedDocument.extractionMethod)}">${escapeHtml(extractionMethod)}</span>`;
+    }
+
+    return `
+        <article class="document-card">
+            <div class="document-card-head">
+                <div>
+                    <div class="document-card-title-row">
+                        <h4>${escapeHtml(title)}</h4>
+                        ${statusBadgeHtml}
+                    </div>
+                    ${documentMetaParts ? `<p class="document-extraction-meta">${escapeHtml(documentMetaParts)}</p>` : ''}
+                    <p class="document-extraction-meta">
+                        ${extractedDocument
+                            ? `${extractedText ? `Текст витягнуто: ${formatNumber(extractedText.length)} символів.` : 'Текст не витягнуто.'}`
+                            : (isExtractionRunning ? 'Документ очікує завершення витягу.' : 'Для цього документа ще немає витягнутих даних.')}
+                    </p>
+                </div>
+                <a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm">PDF</a>
+            </div>
+            ${extractedDocument?.error ? `
+                <p class="document-extraction-error">${escapeHtml(extractedDocument.error)}</p>
+            ` : ''}
+            ${extractedText ? `
+                <details class="document-text-preview">
+                    <summary>Показати витягнутий текст</summary>
+                    <pre>${escapeHtml(extractedText)}</pre>
+                </details>
+            ` : ''}
+        </article>
+    `;
+}
+
+function createExtractedDocumentHtml(document) {
+    return createContractDocumentHtml(
+        { sourceDocument: null, extractedDocument: document },
+        'completed',
+    );
+}
+
+function createMetaListItem(label, value) {
+    return `
+        <div class="meta-list-item">
+            <span class="meta-list-label">${escapeHtml(label)}</span>
+            <span class="meta-list-value">${escapeHtml(value)}</span>
+        </div>
+    `;
+}
+
+function setExtractionLoading(contractRef, message) {
+    renderExtractionHtml(contractRef, `
+        <div class="document-extraction-loading">
+            <span class="inline-spinner"></span>
+            <span>${escapeHtml(message)}</span>
+        </div>
+    `);
+}
+
+function renderExtractionHtml(contractRef, html) {
+    const panel = getExtractionPanel(contractRef);
+    const body = panel?.querySelector('.document-extraction-body');
+
+    if (!body) {
+        return;
+    }
+
+    body.innerHTML = html;
+    panel.classList.remove('hidden');
+}
+
+function renderExtractionError(contractRef, error) {
+    const message = error?.response?.data?.message || error?.message || 'Не вдалося завантажити витяг з документів';
+
+    renderExtractionHtml(contractRef, `
+        <div class="document-extraction-head">
+            <div>
+                <span class="detail-label">Витяг з документів</span>
+                <p class="document-extraction-meta document-extraction-error">${escapeHtml(message)}</p>
+            </div>
+            <button type="button" class="btn btn-secondary btn-sm" data-extraction-refresh="${escapeHtml(contractRef)}">Спробувати ще раз</button>
+        </div>
+    `);
+}
+
+function getExtractionPanel(contractRef) {
+    return document.querySelector(`[data-extraction-panel="${CSS.escape(contractRef)}"]`);
+}
+
+function getExtractionStateLabel(state) {
+    const map = {
+        queued: 'У черзі',
+        waiting: 'Очікує на обробку',
+        active: 'Обробляється',
+        processing: 'Обробляється',
+        delayed: 'Відкладено',
+    };
+
+    return map[state] || 'Обробляється';
+}
+
+function isActiveProcessState(state) {
+    return ['queued', 'waiting', 'active', 'processing', 'delayed'].includes(state);
+}
+
+function getProcessStepStatusView(step, status) {
+    const state = status?.state || 'idle';
+    const result = status?.result || null;
+
+    if (step === 'extraction') {
+        if (state === 'idle') {
+            return { label: 'Не запускалось', badgeClass: 'muted', meta: 'Ще не запускалось.' };
+        }
+        if (isActiveProcessState(state)) {
+            return { label: 'В процесі', badgeClass: 'active', meta: 'Йде обробка документів.' };
+        }
+        if (state === 'failed') {
+            return { label: 'Помилка', badgeClass: 'unsuccessful', meta: status?.failureReason || 'Не вдалося обробити документи.' };
+        }
+        if (state === 'completed') {
+            return { label: 'Завершено', badgeClass: 'complete', meta: `${formatNumber(result?.processedDocuments || 0)} документів.` };
+        }
+        if (state === 'completed_text') {
+            return { label: 'Лише текст', badgeClass: 'warning', meta: 'Текст є, таблиць замало.' };
+        }
+        if (state === 'completed_no_tables') {
+            return { label: 'Без таблиць', badgeClass: 'warning', meta: 'Таблиці не знайдено.' };
+        }
+        if (state === 'no_contract_documents') {
+            return { label: 'Без документів', badgeClass: 'warning', meta: 'У Prozorro немає документів.' };
+        }
+        if (state === 'no_relevant_documents') {
+            return { label: 'Немає релевантних', badgeClass: 'warning', meta: 'Не знайдено придатних документів.' };
+        }
+        if (state === 'requires_mistral_config') {
+            return { label: 'Потрібен OCR', badgeClass: 'unsuccessful', meta: 'Потрібен Mistral OCR.' };
+        }
+    }
+
+    if (step === 'ai-extraction') {
+        const items = Array.isArray(result?.items) ? result.items : [];
+        const documentCount = countDocumentDerivedAiItems(items);
+        const fallbackCount = Math.max(items.length - documentCount, 0);
+
+        if (state === 'idle') {
+            return { label: 'Не запускалось', badgeClass: 'muted', meta: 'Очікує документи.' };
+        }
+        if (isActiveProcessState(state)) {
+            return { label: 'В процесі', badgeClass: 'active', meta: 'Gemini збирає позиції.' };
+        }
+        if (state === 'failed') {
+            return { label: 'Помилка', badgeClass: 'unsuccessful', meta: status?.failureReason || 'Не вдалося виконати AI витяг.' };
+        }
+        if (state === 'completed') {
+            return { label: 'Завершено', badgeClass: 'complete', meta: `${formatNumber(documentCount)} позицій з документів.` };
+        }
+        if (state === 'completed_api_fallback_only') {
+            return { label: 'Лише API', badgeClass: 'warning', meta: `${formatNumber(fallbackCount || items.length)} позицій тільки з API.` };
+        }
+        if (state === 'completed_no_items') {
+            return { label: 'Без позицій', badgeClass: 'warning', meta: 'Позиції не знайдено.' };
+        }
+        if (state === 'no_extracted_text') {
+            return { label: 'Немає тексту', badgeClass: 'warning', meta: 'Спершу потрібен витяг тексту.' };
+        }
+        if (state === 'requires_gemini_config') {
+            return { label: 'Потрібен Gemini', badgeClass: 'unsuccessful', meta: 'Потрібен Gemini API key.' };
+        }
+    }
+
+    if (step === 'ai-audit') {
+        if (state === 'idle') {
+            return { label: 'Не запускалось', badgeClass: 'muted', meta: 'Очікує позиції.' };
+        }
+        if (isActiveProcessState(state)) {
+            return { label: 'В процесі', badgeClass: 'active', meta: 'Gemini оцінює ризики.' };
+        }
+        if (state === 'failed') {
+            return { label: 'Помилка', badgeClass: 'unsuccessful', meta: status?.failureReason || 'Не вдалося виконати AI аудит.' };
+        }
+        if (state === 'completed') {
+            return { label: 'Завершено', badgeClass: 'complete', meta: `${formatNumber(result?.itemsAudited || 0)} позицій перевірено.` };
+        }
+        if (state === 'completed_no_items') {
+            return { label: 'Без результату', badgeClass: 'warning', meta: 'Немає валідних позицій.' };
+        }
+        if (state === 'no_items_to_audit') {
+            return { label: 'Немає позицій', badgeClass: 'warning', meta: 'Немає що перевіряти.' };
+        }
+        if (state === 'no_document_items_to_audit') {
+            return { label: 'Немає позицій з документів', badgeClass: 'warning', meta: 'Лише API fallback.' };
+        }
+        if (state === 'requires_gemini_config') {
+            return { label: 'Потрібен Gemini', badgeClass: 'unsuccessful', meta: 'Потрібен Gemini API key.' };
+        }
+    }
+
+    return { label: 'Невідомо', badgeClass: 'muted', meta: 'Стан тимчасово недоступний.' };
+}
+
+function buildDetailProcessSection(contractRef, latestExtraction, latestAiExtraction, latestAiAudit) {
+    const extractionStatus = getProcessStepStatusView('extraction', latestExtraction);
+    const aiExtractionStatus = getProcessStepStatusView('ai-extraction', latestAiExtraction);
+    const aiAuditStatus = getProcessStepStatusView('ai-audit', latestAiAudit);
+    const extractionState = latestExtraction?.state || 'idle';
+    const aiExtractionState = latestAiExtraction?.state || 'idle';
+    const aiAuditState = latestAiAudit?.state || 'idle';
+    const isBusy = [extractionState, aiExtractionState, aiAuditState].some((state) => isActiveProcessState(state));
+    const hasAnyRun = Boolean(latestExtraction || latestAiExtraction || latestAiAudit);
+    const primaryActionLabel = hasAnyRun ? 'Перезапустити аналіз' : 'Почати аналіз';
+    const introText = isBusy
+        ? 'Аналіз триває.'
+        : 'Документи -> позиції -> аудит';
+
+    return `
+        <div class="detail-process-content">
+            <div class="document-extraction-head">
+                <div>
+                    <p class="document-extraction-meta">${introText}</p>
+                </div>
+                <div class="document-extraction-actions">
+                    ${latestAiAudit?.state === 'completed' ? `<button type="button" class="btn btn-secondary btn-sm" data-open-audit-report="${escapeHtml(contractRef)}">Сторінка звіту</button>` : ''}
+                    ${isBusy ? `<button type="button" class="btn btn-secondary btn-sm" data-detail-extraction-refresh="${escapeHtml(contractRef)}">Оновити</button>` : ''}
+                    ${!isBusy ? `<button type="button" class="btn btn-primary btn-sm" data-detail-extraction-run="${escapeHtml(contractRef)}">${primaryActionLabel}</button>` : ''}
+                </div>
+            </div>
+            <div class="process-status-grid">
+                ${createProcessStatusCardHtml('1. Документи', extractionStatus)}
+                ${createProcessStatusCardHtml('2. Позиції', aiExtractionStatus)}
+                ${createProcessStatusCardHtml('3. Аудит', aiAuditStatus)}
+            </div>
+        </div>
+    `;
+}
+
+function createProcessStatusCardHtml(title, status) {
+    return `
+        <div class="process-status-card is-${escapeHtml(status.badgeClass)}">
+            <div class="process-status-head">
+                <span class="process-status-title">${escapeHtml(title)}</span>
+                <span class="badge badge-${escapeHtml(status.badgeClass)}">${escapeHtml(status.label)}</span>
+            </div>
+            <p class="process-status-meta">${escapeHtml(status.meta || '—')}</p>
+        </div>
+    `;
+}
+
+function buildDetailUsageSection(processingUsage) {
+    const total = processingUsage?.total || null;
+
+    if (!total) {
+        return `
+            <div class="usage-empty">
+                Дані про токени, OCR сторінки і вартість з'являться після запуску аналізу.
+            </div>
+        `;
+    }
+
+    const stageCards = [
+        {
+            title: 'Документи',
+            summary: processingUsage?.extraction || null,
+            meta: 'PDF text / Mistral OCR',
+        },
+        {
+            title: 'Витяг позицій',
+            summary: processingUsage?.aiExtraction || null,
+            meta: 'Gemini extraction',
+        },
+        {
+            title: 'Аудит',
+            summary: processingUsage?.aiAudit || null,
+            meta: 'Grounded + structured + final',
+        },
+    ];
+
+    return `
+        <div class="usage-overview">
+            <div class="usage-totals-grid">
+                ${createUsageTotalCardHtml('Estimated cost', formatUsdValue(total.totalEstimatedCostUsd))}
+                ${createUsageTotalCardHtml('Input tokens', formatNumber(total.totalPromptTokens))}
+                ${createUsageTotalCardHtml('Output tokens', formatNumber(total.totalOutputTokens))}
+                ${createUsageTotalCardHtml('OCR сторінок', formatNumber(total.totalProcessedPages))}
+            </div>
+
+            <div class="usage-stage-grid">
+                ${stageCards.map((stage) => createUsageStageCardHtml(stage.title, stage.summary, stage.meta)).join('')}
+            </div>
+        </div>
+    `;
+}
+
+function createUsageTotalCardHtml(label, value) {
+    return `
+        <div class="usage-total-card">
+            <span class="usage-total-label">${escapeHtml(label)}</span>
+            <strong class="usage-total-value">${escapeHtml(value)}</strong>
+        </div>
+    `;
+}
+
+function createUsageStageCardHtml(title, summary, meta) {
+    if (!summary) {
+        return `
+            <div class="usage-stage-card">
+                <div class="usage-stage-head">
+                    <span class="usage-stage-title">${escapeHtml(title)}</span>
+                </div>
+                <p class="usage-stage-meta">${escapeHtml(meta)}</p>
+                <p class="usage-stage-empty">Ще немає даних.</p>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="usage-stage-card">
+            <div class="usage-stage-head">
+                <span class="usage-stage-title">${escapeHtml(title)}</span>
+                <span class="badge badge-muted">${escapeHtml(formatUsdValue(summary.totalEstimatedCostUsd))}</span>
+            </div>
+            <p class="usage-stage-meta">${escapeHtml(meta)}</p>
+            <div class="usage-stage-stats">
+                ${createUsageStatHtml('Input', formatNumber(summary.totalPromptTokens))}
+                ${createUsageStatHtml('Output', formatNumber(summary.totalOutputTokens))}
+                ${createUsageStatHtml('OCR сторінок', formatNumber(summary.totalProcessedPages))}
+                ${createUsageStatHtml('Grounded search', formatNumber(summary.totalGroundedSearchRequests))}
+            </div>
+        </div>
+    `;
+}
+
+function createUsageStatHtml(label, value) {
+    return `
+        <div class="usage-stat-item">
+            <span class="usage-stat-label">${escapeHtml(label)}</span>
+            <span class="usage-stat-value">${escapeHtml(value)}</span>
+        </div>
+    `;
+}
+
+function getDetailSectionStorageKey(contractRef, sectionKey) {
+    return `${DETAIL_SECTION_STORAGE_PREFIX}:${contractRef}:${sectionKey}`;
+}
+
+function isDetailSectionExpanded(contractRef, sectionKey, defaultExpanded = true) {
+    try {
+        const stored = window.localStorage.getItem(getDetailSectionStorageKey(contractRef, sectionKey));
+        if (stored === null) {
+            return defaultExpanded;
+        }
+
+        return stored === '1';
+    } catch {
+        return defaultExpanded;
+    }
+}
+
+function setDetailSectionExpanded(contractRef, sectionKey, expanded) {
+    try {
+        window.localStorage.setItem(getDetailSectionStorageKey(contractRef, sectionKey), expanded ? '1' : '0');
+    } catch {
+        // noop
+    }
+}
+
+function getDetailSectionToggleLabel(expanded) {
+    return expanded ? 'Згорнути' : 'Розгорнути';
+}
+
+function buildDetailSection({
+    contractRef,
+    sectionKey,
+    title,
+    bodyHtml,
+    subtle = false,
+    headerAsideHtml = '',
+    defaultExpanded = true,
+    rootDataAttrsHtml = '',
+}) {
+    const expanded = isDetailSectionExpanded(contractRef, sectionKey, defaultExpanded);
+
+    return `
+        <section class="contract-detail-section${subtle ? ' subtle' : ''}${expanded ? '' : ' is-collapsed'}" data-detail-section="${escapeHtml(sectionKey)}" data-detail-section-contract="${escapeHtml(contractRef)}" ${rootDataAttrsHtml}>
+            <div class="section-header compact">
+                <h3>${escapeHtml(title)}</h3>
+                <div class="section-header-actions">
+                    ${headerAsideHtml}
+                    <button
+                        type="button"
+                        class="section-toggle-button"
+                        data-detail-section-toggle="${escapeHtml(sectionKey)}"
+                        data-detail-section-contract="${escapeHtml(contractRef)}"
+                        aria-expanded="${expanded ? 'true' : 'false'}"
+                    >
+                        <span class="section-toggle-label">${getDetailSectionToggleLabel(expanded)}</span>
+                        <span class="section-toggle-icon" aria-hidden="true">▾</span>
+                    </button>
+                </div>
+            </div>
+            <div class="detail-section-body"${expanded ? '' : ' hidden'}>
+                ${bodyHtml}
+            </div>
+        </section>
+    `;
+}
+
+function getDocumentExtractionMethodLabel(method) {
+    const map = {
+        'pdf-text': 'PDF text',
+        'mistral-ocr': 'Mistral OCR',
+    };
+
+    return map[method] || 'Невідомий метод';
+}
+
+function getDocumentExtractionMethodBadgeClass(method) {
+    const map = {
+        'pdf-text': 'complete',
+        'mistral-ocr': 'active',
+    };
+
+    return map[method] || 'unsuccessful';
+}
+
+async function renderContractDetailPage(contractRef, { forceRefresh = false } = {}) {
+    if (!forceRefresh && contractDetailCache.has(contractRef)) {
+        renderContractDetail(contractDetailCache.get(contractRef));
+        return;
+    }
+
+    els.contractDetailView.innerHTML = `
+        <div class="contract-detail-shell glass">
+            <div class="document-extraction-loading">
+                <span class="inline-spinner"></span>
+                <span>Завантажую сторінку контракту...</span>
+            </div>
+        </div>
+    `;
+
+    try {
+        const response = await axios.get(
+            `${EXTRACTION_API_BASE}/contracts/${encodeURIComponent(contractRef)}/details`,
+            {
+                headers: {
+                    'X-API-KEY': API_KEY,
+                },
+            },
+        );
+
+        contractDetailCache.set(contractRef, response.data);
+        renderContractDetail(response.data);
+    } catch (error) {
+        const message = error?.response?.data?.message || error?.message || 'Не вдалося завантажити сторінку контракту';
+
+        els.contractDetailView.innerHTML = `
+            <div class="contract-detail-shell glass">
+                <div class="contract-detail-head">
+                    <button type="button" class="btn btn-secondary btn-sm" data-back-to-results>Назад до списку</button>
+                </div>
+                <div class="document-extraction-empty">
+                    <p class="document-extraction-error">${escapeHtml(message)}</p>
+                </div>
+            </div>
+        `;
+    }
+}
+
+async function renderContractAuditReportPage(contractRef, { forceRefresh = false } = {}) {
+    if (!forceRefresh && contractAuditReportCache.has(contractRef)) {
+        renderContractAuditReport(contractAuditReportCache.get(contractRef));
+        return;
+    }
+
+    els.auditReportView.innerHTML = `
+        <article class="contract-detail-shell glass">
+            <div class="document-extraction-loading">
+                <span class="inline-spinner"></span>
+                <span>Завантажую звіт аудиту...</span>
+            </div>
+        </article>
+    `;
+
+    try {
+        const response = await axios.get(
+            `${EXTRACTION_API_BASE}/contracts/${encodeURIComponent(contractRef)}/report`,
+            {
+                headers: {
+                    'X-API-KEY': API_KEY,
+                },
+            },
+        );
+
+        contractAuditReportCache.set(contractRef, response.data);
+        renderContractAuditReport(response.data);
+    } catch (error) {
+        const message = error?.response?.data?.message || error?.message || 'Не вдалося завантажити звіт аудиту';
+
+        els.auditReportView.innerHTML = `
+            <article class="contract-detail-shell glass">
+                <div class="contract-detail-head">
+                    <div class="contract-page-actions contract-page-actions-top">
+                        <button type="button" class="btn btn-secondary btn-sm" data-back-to-contract="${escapeHtml(contractRef)}">Назад до контракту</button>
+                    </div>
+                    <div class="contract-detail-title-block">
+                        <h2>Звіт аудиту</h2>
+                    </div>
+                </div>
+                <p>${escapeHtml(message)}</p>
+            </article>
+        `;
+    }
+}
+
+function handleDetailSectionToggle(button) {
+    const section = button.closest('[data-detail-section]');
+    const body = section?.querySelector('.detail-section-body');
+    const contractRef = button.dataset.detailSectionContract;
+    const sectionKey = button.dataset.detailSectionToggle;
+
+    if (!section || !body || !contractRef || !sectionKey) {
+        return;
+    }
+
+    const nextExpanded = section.classList.contains('is-collapsed');
+
+    section.classList.toggle('is-collapsed', !nextExpanded);
+    body.hidden = !nextExpanded;
+    button.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
+
+    const label = button.querySelector('.section-toggle-label');
+    if (label) {
+        label.textContent = getDetailSectionToggleLabel(nextExpanded);
+    }
+
+    setDetailSectionExpanded(contractRef, sectionKey, nextExpanded);
+}
+
+function renderContractDetail(payload) {
+    const contract = payload?.contract || {};
+    const tender = payload?.tender || {};
+    const sourceContract = payload?.sourceContract || null;
+    const latestExtraction = payload?.latestExtraction || null;
+    const latestAiExtraction = payload?.latestAiExtraction || null;
+    const latestAiAudit = payload?.latestAiAudit || null;
+    const processingUsage = payload?.processingUsage || null;
+    const sourceDocuments = Array.isArray(payload?.sourceDocuments) ? payload.sourceDocuments : [];
+    const currency = contract.currency || tender.currency || 'UAH';
+    const contractRef = contract.contractID || contract.id;
+    const title = tender.title || 'Без назви контракту';
+    const sourceItems = Array.isArray(sourceContract?.items) ? sourceContract.items : [];
+    const apiItemsCount = sourceItems.length > 0
+        ? sourceItems.length
+        : (Array.isArray(payload?.resolvedItems) ? payload.resolvedItems.length : 0);
+    const extractedAiItems = Array.isArray(latestAiExtraction?.result?.items)
+        ? latestAiExtraction.result.items
+        : [];
+    const documentItemsCount = countDocumentDerivedAiItems(extractedAiItems);
+    const shouldRefresh = shouldAutoRefreshContractDetail(
+        latestExtraction,
+        latestAiExtraction,
+        latestAiAudit,
+    );
+    const contractMetaBodyHtml = `
+        <div class="meta-list">
+            ${createMetaListItem('ID', contract.contractID || contract.id || '—')}
+            ${createMetaListItem('Постачальник', `${contract.supplierName || '—'} (${contract.supplierEdrpou || '—'})`)}
+            ${createMetaListItem('Замовник', `${tender.customerName || '—'} (${tender.customerEdrpou || '—'})`)}
+            ${createMetaListItem('Сума контракту', formatMoneyValue(contract.amount, currency))}
+            ${createMetaListItem('Сума Net', formatMoneyValue(contract.amountNet, currency))}
+            ${createMetaListItem('ПДВ', contract.valueAddedTaxIncluded ? 'з ПДВ' : 'без ПДВ')}
+            ${createMetaListItem('Підписано', formatDateTime(contract.dateSigned))}
+            ${createMetaListItem('Створено', formatDateTime(contract.dateCreated))}
+            ${createMetaListItem('Змінено', formatDateTime(contract.dateModified))}
+            ${sourceContract ? createMetaListItem('Contract number', sourceContract.contractNumber || '—') : ''}
+            ${sourceContract ? createMetaListItem('Період від', formatDateTime(sourceContract.period?.startDate)) : ''}
+            ${sourceContract ? createMetaListItem('Період до', formatDateTime(sourceContract.period?.endDate)) : ''}
+        </div>
+        <div class="contract-page-actions sidebar-actions">
+            <a
+                href="${escapeHtml(getExternalLink(true, contract.contractID))}"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="btn btn-secondary btn-sm"
+            >Контракт у Prozorro</a>
+        </div>
+    `;
+    const tenderMetaBodyHtml = `
+        <div class="meta-list">
+            ${createMetaListItem('ID тендеру', tender.tenderID || '—')}
+            ${createMetaListItem('Сума тендеру', formatMoneyValue(tender.amount, tender.currency || 'UAH'))}
+            ${createMetaListItem('Створено тендер', formatDateTime(tender.dateCreated))}
+            ${createMetaListItem('Оновлено тендер', formatDateTime(tender.dateModified))}
+        </div>
+        <div class="contract-page-actions sidebar-actions">
+            <a
+                href="${escapeHtml(getExternalLink(false, tender.tenderID))}"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="btn btn-secondary btn-sm"
+            >Тендер у Prozorro</a>
+        </div>
+    `;
+
+    els.contractDetailView.innerHTML = `
+        <article class="contract-detail-shell glass">
+            <div class="contract-detail-head">
+                <div class="contract-page-actions contract-page-actions-top">
+                    <button type="button" class="btn btn-secondary btn-sm" data-back-to-results>Назад до списку</button>
+                </div>
+                <div class="contract-detail-title-block">
+                    <h2>${escapeHtml(title)}</h2>
+                </div>
+            </div>
+
+            <div class="contract-detail-layout">
+                <div class="contract-detail-main">
+                    ${buildDetailSection({
+                        contractRef,
+                        sectionKey: 'process',
+                        title: 'Статус обробки',
+                        bodyHtml: buildDetailProcessSection(contractRef, latestExtraction, latestAiExtraction, latestAiAudit),
+                    })}
+
+                    ${buildDetailSection({
+                        contractRef,
+                        sectionKey: 'usage',
+                        title: 'Використання AI/OCR',
+                        subtle: true,
+                        headerAsideHtml: processingUsage?.total
+                            ? `<span class="badge badge-muted">${escapeHtml(formatUsdValue(processingUsage.total.totalEstimatedCostUsd))}</span>`
+                            : '',
+                        bodyHtml: buildDetailUsageSection(processingUsage),
+                    })}
+
+                    ${buildDetailSection({
+                        contractRef,
+                        sectionKey: 'positions',
+                        title: 'Позиції',
+                        bodyHtml: buildDetailAiExtractionSection(contractRef, latestAiExtraction, latestAiAudit),
+                        headerAsideHtml: `
+                            <span class="document-extraction-meta">З документів: ${escapeHtml(formatNumber(documentItemsCount))}</span>
+                            <span class="document-extraction-meta">В API: ${escapeHtml(formatNumber(apiItemsCount))}</span>
+                        `,
+                    })}
+
+                    ${buildDetailSection({
+                        contractRef,
+                        sectionKey: 'documents',
+                        title: 'Документи',
+                        headerAsideHtml: `<span class="document-extraction-meta">${formatNumber(sourceDocuments.length)} документів</span>`,
+                        bodyHtml: buildDetailDocumentsSection(contractRef, sourceDocuments, latestExtraction),
+                    })}
+
+                </div>
+            </div>
+
+            <div class="contract-detail-secondary-grid">
+                ${buildDetailSection({
+                    contractRef,
+                    sectionKey: 'contract-meta',
+                    title: 'Контракт',
+                    subtle: true,
+                    headerAsideHtml: `<span class="badge badge-${getBadgeClass(contract.status || '')}">${escapeHtml(contract.status || '—')}</span>`,
+                    bodyHtml: contractMetaBodyHtml,
+                })}
+
+                ${buildDetailSection({
+                    contractRef,
+                    sectionKey: 'tender-meta',
+                    title: 'Тендер',
+                    subtle: true,
+                    headerAsideHtml: `<span class="badge badge-${getBadgeClass(tender.status || '')}">${escapeHtml(tender.status || '—')}</span>`,
+                    bodyHtml: tenderMetaBodyHtml,
+                })}
+            </div>
+        </article>
+    `;
+
+    scheduleDetailAutoRefresh(contractRef, shouldRefresh);
+}
+
+function renderContractAuditReport(payload) {
+    const contract = payload?.contract || {};
+    const reportDocument = payload?.reportDocument || null;
+    const items = Array.isArray(payload?.items) ? payload.items : [];
+    const contractRef = contract.contractID || contract.id || '';
+    const generatedAt = formatDateTime(reportDocument?.generatedAt);
+    const blocks = Array.isArray(reportDocument?.blocks) ? reportDocument.blocks : [];
+
+    if (!reportDocument) {
+        els.auditReportView.innerHTML = `
+            <article>
+                <p>
+                    <button type="button" data-back-to-contract="${escapeHtml(contractRef)}">Назад до контракту</button>
+                    <button type="button" data-audit-report-refresh="${escapeHtml(contractRef)}">Оновити</button>
+                </p>
+                <h1>Звіт аудиту</h1>
+                <p>Звіт аудиту ще недоступний. Спершу заверши аналіз договору.</p>
+            </article>
+        `;
+        return;
+    }
+
+    els.auditReportView.innerHTML = `
+        <article>
+            <p>
+                <button type="button" data-back-to-contract="${escapeHtml(contractRef)}">Назад до контракту</button>
+                <button type="button" data-audit-report-refresh="${escapeHtml(contractRef)}">Оновити</button>
+            </p>
+            <h1>Звіт аудиту договору</h1>
+            <p>${escapeHtml(contract.contractID || contract.id || '—')}</p>
+            ${generatedAt !== '—' ? `<p>${escapeHtml(generatedAt)}</p>` : ''}
+            ${blocks.map((block) => createAuditReportBlockHtml(block, items)).join('')}
+        </article>
+    `;
+}
+
+function shouldAutoRefreshContractDetail(latestExtraction, latestAiExtraction, latestAiAudit) {
+    const activeStates = ['queued', 'waiting', 'active', 'processing', 'delayed'];
+    const extractionState = latestExtraction?.state || 'idle';
+    const aiExtractionState = latestAiExtraction?.state || 'idle';
+    const aiAuditState = latestAiAudit?.state || 'idle';
+
+    if (activeStates.includes(extractionState) || activeStates.includes(aiExtractionState) || activeStates.includes(aiAuditState)) {
+        return true;
+    }
+
+    if (
+        ['completed', 'completed_text', 'completed_no_tables', 'completed_no_items'].includes(extractionState) &&
+        !latestAiExtraction
+    ) {
+        return true;
+    }
+
+    if (
+        ['completed', 'completed_no_items', 'completed_api_fallback_only'].includes(aiExtractionState) &&
+        !latestAiAudit
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
+function scheduleDetailAutoRefresh(contractRef, shouldRefresh) {
+    clearDetailAutoRefresh();
+
+    if (!shouldRefresh) {
+        return;
+    }
+
+    detailAutoRefreshContractRef = contractRef;
+    detailAutoRefreshTimer = window.setTimeout(() => {
+        if (!detailAutoRefreshContractRef) {
+            return;
+        }
+
+        renderContractDetailPage(detailAutoRefreshContractRef, { forceRefresh: true });
+    }, 3500);
+}
+
+function clearDetailAutoRefresh() {
+    if (detailAutoRefreshTimer) {
+        window.clearTimeout(detailAutoRefreshTimer);
+        detailAutoRefreshTimer = null;
+    }
+
+    detailAutoRefreshContractRef = '';
+}
+
+function isDocumentDerivedAiItem(item) {
+    return item?.source === 'document';
+}
+
+function countDocumentDerivedAiItems(items) {
+    return Array.isArray(items)
+        ? items.filter((item) => isDocumentDerivedAiItem(item)).length
+        : 0;
+}
+
+async function runDetailExtraction(contractRef) {
+    try {
+        await axios.post(
+            `${EXTRACTION_API_BASE}/contracts/${encodeURIComponent(contractRef)}/run`,
+            {},
+            {
+                headers: {
+                    'X-API-KEY': API_KEY,
+                },
+            },
+        );
+
+        contractDetailCache.delete(contractRef);
+        extractionCache.delete(contractRef);
+        contractAuditReportCache.delete(contractRef);
+        await renderContractDetailPage(contractRef, { forceRefresh: true });
+    } catch (error) {
+        const message = error?.response?.data?.message || error?.message || 'Не вдалося запустити витяг';
+
+        const statusContainer = els.contractDetailView.querySelector('.detail-extraction-content');
+        if (statusContainer) {
+            statusContainer.innerHTML = `
+                <div class="document-extraction-empty">
+                    <p class="document-extraction-error">${escapeHtml(message)}</p>
+                </div>
+            `;
+        }
+    }
+}
+
+function buildDetailDocumentsSection(contractRef, sourceDocuments, latestExtraction) {
+    const hasExtractionRun = Boolean(latestExtraction);
+    const state = latestExtraction?.state || 'idle';
+    const result = latestExtraction?.result || null;
+    const extractedDocuments = Array.isArray(result?.documents) ? result.documents : [];
+    const mergedDocuments = mergeContractDocuments(sourceDocuments, extractedDocuments);
+    const documentsWithText = extractedDocuments.filter((document) => typeof document?.extractedText === 'string' && document.extractedText.trim().length > 0).length;
+    const detectedTables = extractedDocuments.reduce(
+        (sum, document) => sum + (Array.isArray(document?.tables) ? document.tables.length : 0),
+        0,
+    );
+    const documentsHtml = mergedDocuments.length > 0
+        ? mergedDocuments.map((document) => createContractDocumentHtml(document, state)).join('')
+        : `<div class="document-extraction-empty">Документи контракту в джерелі не знайдені або тимчасово недоступні.</div>`;
+
+    let summaryHtml = `
+        <p class="document-extraction-meta">
+            У контракті доступно ${formatNumber(sourceDocuments.length)} документів.
+        </p>
+    `;
+
+    if (!hasExtractionRun) {
+        summaryHtml += `
+            <p class="document-extraction-meta">Аналіз ще не запускався.</p>
+        `;
+    } else if (['queued', 'waiting', 'active', 'processing', 'delayed'].includes(state)) {
+        summaryHtml += `
+            <div class="document-extraction-loading inline">
+                <span class="inline-spinner"></span>
+                <span>${escapeHtml(getExtractionStateLabel(state))}</span>
+            </div>
+        `;
+    } else if (state === 'failed') {
+        summaryHtml += `
+            <p class="document-extraction-error">${escapeHtml(latestExtraction.failureReason || 'Не вдалося обробити документи')}</p>
+        `;
+    } else {
+        summaryHtml += `
+            <p class="document-extraction-meta">
+                Текст знайдено у ${formatNumber(documentsWithText)} документах, таблиць знайдено ${formatNumber(detectedTables)}.
+            </p>
+        `;
+    }
+
+    return `
+        <div class="detail-extraction-content detail-documents-content">
+            <div class="document-extraction-head">
+                <div>
+                    ${summaryHtml}
+                </div>
+            </div>
+            <div class="document-extraction-docs">
+                ${documentsHtml}
+            </div>
+        </div>
+    `;
+}
+
+function buildDetailAiExtractionSection(contractRef, latestAiExtraction, latestAiAudit) {
+    if (!latestAiExtraction) {
+        return `
+            <div class="detail-ai-extraction-content">
+                <div class="document-extraction-head">
+                    <div>
+                        <p class="document-extraction-meta">AI витяг ще не запускався. Запусти загальний аналіз у блоці "Документи".</p>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    const state = latestAiExtraction.state || 'idle';
+    const result = latestAiExtraction.result;
+
+    if (state === 'processing') {
+        return `
+            <div class="detail-ai-extraction-content">
+                <div class="document-extraction-head">
+                    <div class="document-extraction-loading inline">
+                        <span class="inline-spinner"></span>
+                        <span>Gemini обробляє витягнутий текст...</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    if (state === 'failed') {
+        return `
+            <div class="detail-ai-extraction-content">
+                <div class="document-extraction-head">
+                    <div>
+                        <p class="document-extraction-error">${escapeHtml(latestAiExtraction.failureReason || 'Не вдалося виконати AI витяг')}</p>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    if (state === 'requires_gemini_config') {
+        return `
+            <div class="detail-ai-extraction-content">
+                <div class="document-extraction-head">
+                    <div>
+                        <p class="document-extraction-error">Потрібно додати <code>GEMINI_API_KEY</code> в env.</p>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    if (state === 'no_extracted_text') {
+        return `
+            <div class="detail-ai-extraction-content">
+                <div class="document-extraction-head">
+                    <div>
+                        <p class="document-extraction-meta">Спершу треба виконати витяг з документів, щоб з'явився текст для AI.</p>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    const items = Array.isArray(result?.items) ? result.items : [];
+    const mergedItems = mergeAiExtractionWithAudit(items, latestAiAudit);
+    const auditControlsHtml = buildInlineAuditControls(latestAiAudit, items);
+    const contractAuditHtml = buildContractFinalAuditHtml(latestAiAudit);
+    const auditReferencesHtml = buildInlineAuditReferences(latestAiAudit);
+    const headerHtml = auditControlsHtml
+        ? `
+            <div class="document-extraction-head">
+                <div>
+                    ${auditControlsHtml}
+                </div>
+            </div>
+        `
+        : '';
+
+    return `
+        <div class="detail-ai-extraction-content">
+            ${headerHtml}
+            ${contractAuditHtml}
+            ${items.length > 0 ? `
+                <div class="contract-items-table-wrap">
+                    <table class="contract-items-table ai-items-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">Назва</th>
+                                <th scope="col">Ризик</th>
+                                <th scope="col">Ринкова ціна</th>
+                                <th scope="col">Завищення</th>
+                                <th scope="col">Ціна за од.</th>
+                                <th scope="col">Сума</th>
+                                <th scope="col">Кількість</th>
+                                <th scope="col">Одиниця</th>
+                                <th scope="col">Валюта</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${mergedItems.map((item) => createAiExtractedItemRowHtml(item)).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            ` : `
+                <div class="document-extraction-empty">AI не знайшов структурованих позицій у витягнутому тексті.</div>
+            `}
+            ${auditReferencesHtml}
+        </div>
+    `;
+}
+
+function buildContractFinalAuditHtml(latestAiAudit) {
+    const state = latestAiAudit?.state || 'idle';
+    const analysis = state === 'completed' ? latestAiAudit?.result?.contractAnalysis : null;
+
+    if (!analysis) {
+        return '';
+    }
+
+    const procurementInfo = analysis.procurementInfo || {};
+    const dataAvailability = analysis.dataAvailability || {};
+    const financialPricing = analysis.financialPricing || {};
+    const marketAnalytics = analysis.marketAnalytics || {};
+    const conclusion = analysis.conclusion || {};
+    const procurementLines = [
+        buildAuditReportLine('ID договору', procurementInfo.identifier),
+        buildAuditReportLine('Дата підписання', procurementInfo.dateSigned),
+        buildAuditReportLine('Замовник', procurementInfo.customer),
+        buildAuditReportLine('Постачальники', procurementInfo.contractor),
+        procurementInfo.procurementSubject
+            ? buildAuditReportLine('Предмет закупівлі', procurementInfo.procurementSubject)
+            : '',
+    ].filter(Boolean).join('');
+
+    return `
+        <section class="contract-final-audit">
+            <section class="audit-report-section">
+                <h4>Блок 1. Загальна інформація про договір</h4>
+                <div class="audit-report-body">
+                    ${procurementInfo.title ? buildAuditReportLine('Назва', procurementInfo.title) : ''}
+                    ${procurementLines}
+                </div>
+            </section>
+            <section class="audit-report-section">
+                <h4>Блок 2. Доступність даних</h4>
+                <div class="audit-report-body">
+                    ${buildAuditReportList('Надані документи', dataAvailability.providedDocuments)}
+                    ${buildAuditReportList('Відсутні критичні документи', dataAvailability.missingCriticalDocuments)}
+                </div>
+            </section>
+            <section class="audit-report-section">
+                <h4>Блок 3. Фінансово-ціновий аналіз</h4>
+                <div class="audit-report-body">
+                    ${buildAuditReportText('Загальна вартість', financialPricing.totalCost)}
+                    ${buildAuditReportText('Ціна за одиницю', financialPricing.unitPrice)}
+                    ${buildAuditReportText('Ключові елементи ціни', financialPricing.keyPriceElements)}
+                </div>
+            </section>
+            <section class="audit-report-section">
+                <h4>Блок 4. Ринкова аналітика</h4>
+                <div class="audit-report-body">
+                    ${buildAuditReportText('Орієнтовна ринкова ціна', marketAnalytics.estimatedMarketPrice)}
+                    ${buildAuditReportText('Метод порівняння', marketAnalytics.comparisonMethod)}
+                    ${buildAuditReportText('Числове зіставлення', marketAnalytics.numericComparison)}
+                    ${buildAuditReportText('Дані по позиціях договору', marketAnalytics.itemBreakdown)}
+                </div>
+            </section>
+            <section class="audit-report-section">
+                <h4>Блок 5. Висновок</h4>
+                <div class="audit-report-body">
+                    ${buildAuditReportLine('Ознаки завищення', getYesNoInsufficientLabel(conclusion.overpricingSigns))}
+                    ${buildAuditReportText('Орієнтовний розмір відхилення', conclusion.estimatedDeviation)}
+                    ${buildAuditReportText('Коментар на основі фактів', conclusion.comment)}
+                </div>
+            </section>
+        </section>
+    `;
+}
+
+function createAuditReportBlockHtml(block, auditItems = []) {
+    const items = Array.isArray(block?.items) ? block.items : [];
+
+    return `
+        <section>
+            <h3>${escapeHtml(block?.title || 'Блок')}</h3>
+            ${items.map((item) => createAuditReportItemHtml(item, auditItems)).join('')}
+        </section>
+    `;
+}
+
+function createAuditReportItemHtml(item, auditItems = []) {
+    const type = item?.type || 'line';
+    const label = escapeHtml(item?.label || 'Поле');
+
+    if ((item?.label || '') === 'Дані по позиціях договору' && Array.isArray(auditItems) && auditItems.length > 0) {
+        return `
+            <div>
+                <p><strong>${label}:</strong></p>
+                ${createPlainAuditItemsTableHtml(auditItems)}
+            </div>
+        `;
+    }
+
+    if (type === 'list') {
+        const items = Array.isArray(item?.items)
+            ? item.items.filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+            : [];
+
+        if (items.length === 0) {
+            return `<p><strong>${label}:</strong> —</p>`;
+        }
+
+        return `
+            <div>
+                <p><strong>${label}:</strong></p>
+                <ul>
+                    ${items.map((entry) => `<li>${escapeHtml(entry)}</li>`).join('')}
+                </ul>
+            </div>
+        `;
+    }
+
+    if (type === 'text') {
+        return `
+            <div>
+                <p><strong>${label}:</strong></p>
+                <pre>${escapeHtml(formatAuditBlockValue(item?.value))}</pre>
+            </div>
+        `;
+    }
+
+    return `<p><strong>${label}:</strong> ${escapeHtml(formatAuditBlockValue(item?.value))}</p>`;
+}
+
+function createPlainAuditItemsTableHtml(items) {
+    if (!Array.isArray(items) || items.length === 0) {
+        return '';
+    }
+
+    return `
+        <table border="1" cellpadding="6" cellspacing="0">
+            <thead>
+                <tr>
+                    <th>Назва</th>
+                    <th>Ризик</th>
+                    <th>Ринкова ціна</th>
+                    <th>Завищення</th>
+                    <th>Ціна за од.</th>
+                    <th>Сума</th>
+                    <th>Кількість</th>
+                    <th>Одиниця</th>
+                    <th>Валюта</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${items.map((item) => `
+                    <tr>
+                        <td>${escapeHtml(item?.itemName || '—')}</td>
+                        <td>${escapeHtml(getAuditRiskLabel(item?.riskLevel))}</td>
+                        <td>${escapeHtml(formatPlainAuditNumber(item?.marketUnitPrice))}</td>
+                        <td>${escapeHtml(formatPlainAuditPercent(item?.overpricingPercent))}</td>
+                        <td>${escapeHtml(formatPlainAuditNumber(item?.unitPrice))}</td>
+                        <td>${escapeHtml(formatPlainAuditNumber(item?.totalPrice))}</td>
+                        <td>${escapeHtml(formatPlainAuditNumber(item?.quantity))}</td>
+                        <td>${escapeHtml(item?.unit || '—')}</td>
+                        <td>${escapeHtml(item?.currency || '—')}</td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>
+    `;
+}
+
+function formatPlainAuditNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value)
+        ? value.toLocaleString('uk-UA', { maximumFractionDigits: 2 })
+        : '—';
+}
+
+function formatPlainAuditPercent(value) {
+    return typeof value === 'number' && Number.isFinite(value)
+        ? `${value.toLocaleString('uk-UA', { maximumFractionDigits: 2 })}%`
+        : '—';
+}
+
+function formatAuditBlockValue(value) {
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return trimmed.length > 0 ? trimmed : '—';
+    }
+
+    return '—';
+}
+
+function formatAuditBlockList(value) {
+    if (!Array.isArray(value) || value.length === 0) {
+        return '—';
+    }
+
+    const normalized = value
+        .filter((item) => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+    return normalized.length > 0 ? normalized.join('; ') : '—';
+}
+
+function buildAuditReportLine(label, value) {
+    return `
+        <div class="audit-report-line">
+            <strong>${escapeHtml(label)}:</strong>
+            <span>${escapeHtml(formatAuditBlockValue(value))}</span>
+        </div>
+    `;
+}
+
+function buildAuditReportText(label, value) {
+    return `
+        <div class="audit-report-line">
+            <strong>${escapeHtml(label)}:</strong>
+            <div class="audit-report-text">${formatAuditBlockMultiline(value)}</div>
+        </div>
+    `;
+}
+
+function buildAuditReportList(label, items) {
+    const normalized = Array.isArray(items)
+        ? items
+            .filter((item) => typeof item === 'string')
+            .map((item) => item.trim())
+            .filter(Boolean)
+        : [];
+
+    if (normalized.length === 0) {
+        return buildAuditReportLine(label, '—');
+    }
+
+    return `
+        <div class="audit-report-line">
+            <strong>${escapeHtml(label)}:</strong>
+            <ul class="audit-report-list">
+                ${normalized.map((item) => `<li>${formatAuditBlockMultiline(item)}</li>`).join('')}
+            </ul>
+        </div>
+    `;
+}
+
+function formatAuditBlockMultiline(value) {
+    const formatted = formatAuditBlockValue(value);
+    return escapeHtml(formatted).replace(/\n/g, '<br>');
+}
+
+function getAuditRiskLabel(level) {
+    const map = {
+        low: 'Низький',
+        medium: 'Середній',
+        high: 'Високий',
+        critical: 'Критичний',
+        unknown: 'Невизначено',
+    };
+
+    return map[level] || 'Невизначено';
+}
+
+function getYesNoInsufficientLabel(value) {
+    if (value === 'yes') {
+        return 'ТАК';
+    }
+
+    if (value === 'no') {
+        return 'НІ';
+    }
+
+    return 'НЕДОСТАТНЬО ДАНИХ';
+}
+
+function getAuditRiskBadgeClass(level) {
+    if (level === 'low') {
+        return 'complete';
+    }
+
+    if (level === 'medium') {
+        return 'warning';
+    }
+
+    if (level === 'high' || level === 'critical') {
+        return 'unsuccessful';
+    }
+
+    return 'muted';
+}
+
+function buildInlineAuditControls(latestAiAudit, items) {
+    const itemCount = Array.isArray(items) ? items.length : 0;
+    const documentDerivedCount = countDocumentDerivedAiItems(items);
+
+    if (itemCount <= 0) {
+        return '<p class="document-extraction-meta">Спершу потрібні AI-витягнуті позиції з документів, щоб провести аудит.</p>';
+    }
+
+    if (!latestAiAudit) {
+        if (documentDerivedCount <= 0) {
+            return '<p class="document-extraction-meta">У документах не знайдено структурованих позицій, тому аудит на API fallback не запускається.</p>';
+        }
+        return '<p class="document-extraction-meta">Аудит ще не запускався. Він стартує автоматично після загального аналізу документів.</p>';
+    }
+
+    const state = latestAiAudit.state || 'idle';
+
+    if (state === 'processing') {
+        return '<div class="document-extraction-loading inline"><span class="inline-spinner"></span><span>Gemini проводить аудит позицій...</span></div>';
+    }
+
+    if (state === 'failed') {
+        return `<p class="document-extraction-error">${escapeHtml(latestAiAudit.failureReason || 'Не вдалося виконати AI аудит')}</p>`;
+    }
+
+    if (state === 'requires_gemini_config') {
+        return '<p class="document-extraction-error">Потрібно додати <code>GEMINI_API_KEY</code> в env.</p>';
+    }
+
+    if (state === 'no_items_to_audit') {
+        return '<p class="document-extraction-meta">Спершу потрібні AI-витягнуті позиції з документів, щоб провести аудит.</p>';
+    }
+
+    if (state === 'no_document_items_to_audit') {
+        return '<p class="document-extraction-meta">У документах не знайдено структурованих позицій, тому аудит на API fallback не проводився.</p>';
+    }
+
+    return '';
+}
+
+function buildInlineAuditReferences(latestAiAudit) {
+    const result = latestAiAudit?.result;
+    const state = latestAiAudit?.state || 'idle';
+
+    if (state !== 'completed') {
+        return '';
+    }
+
+    const searchQueries = Array.isArray(result?.searchQueries) ? result.searchQueries : [];
+    const sources = Array.isArray(result?.sources) ? result.sources : [];
+
+    return `
+        ${searchQueries.length > 0 ? `
+            <details class="document-text-preview">
+                <summary>Пошукові запити</summary>
+                <div class="audit-reference-list">
+                    ${searchQueries.map((query) => `<span class="header-chip">${escapeHtml(query)}</span>`).join('')}
+                </div>
+            </details>
+        ` : ''}
+        ${sources.length > 0 ? `
+            <details class="document-text-preview">
+                <summary>Джерела</summary>
+                <div class="audit-source-list">
+                    ${sources.map((source) => `
+                        <a href="${escapeHtml(source?.url || '#')}" target="_blank" rel="noopener noreferrer" class="audit-source-link">
+                            ${escapeHtml(source?.title || source?.url || 'Джерело')}
+                        </a>
+                    `).join('')}
+                </div>
+            </details>
+        ` : ''}
+    `;
+}
+
+function mergeAiExtractionWithAudit(items, latestAiAudit) {
+    const auditState = latestAiAudit?.state || 'idle';
+    const auditItems = auditState === 'completed' && Array.isArray(latestAiAudit?.result?.items)
+        ? latestAiAudit.result.items
+        : [];
+    const auditByIndex = new Map(
+        auditItems.map((item) => [Number(item?.itemIndex) || 0, item]),
+    );
+
+    return items.map((item, index) => {
+        const auditItem = auditByIndex.get(index + 1) || null;
+
+        return {
+            ...item,
+            auditRiskLevel: auditItem?.riskLevel || null,
+            auditMarketUnitPrice: typeof auditItem?.marketUnitPrice === 'number' ? auditItem.marketUnitPrice : null,
+            auditMarketPriceMin: typeof auditItem?.marketPriceMin === 'number' ? auditItem.marketPriceMin : null,
+            auditMarketPriceMax: typeof auditItem?.marketPriceMax === 'number' ? auditItem.marketPriceMax : null,
+            auditOverpricingPercent: typeof auditItem?.overpricingPercent === 'number' ? auditItem.overpricingPercent : null,
+        };
+    });
+}
+
+function createAiExtractedItemRowHtml(item) {
+    const hasMarketRange = typeof item?.auditMarketPriceMin === 'number' || typeof item?.auditMarketPriceMax === 'number';
+    const marketValueLabel = typeof item?.auditMarketUnitPrice === 'number'
+        ? formatAmount(item.auditMarketUnitPrice)
+        : '—';
+    const marketRangeLabel = hasMarketRange
+        ? `${typeof item?.auditMarketPriceMin === 'number' ? formatAmount(item.auditMarketPriceMin) : '—'} - ${typeof item?.auditMarketPriceMax === 'number' ? formatAmount(item.auditMarketPriceMax) : '—'}`
+        : null;
+    const overpricingLabel = typeof item?.auditOverpricingPercent === 'number'
+        ? `${item.auditOverpricingPercent >= 0 ? '+' : ''}${formatMaybeNumber(item.auditOverpricingPercent)}%`
+        : '—';
+
+    return `
+        <tr>
+            <td class="contract-items-table-name-cell">
+                <strong class="contract-items-table-title">${escapeHtml(item?.itemName || 'Без назви')}</strong>
+            </td>
+            <td>${item?.auditRiskLevel ? `<span class="badge badge-${getAuditRiskBadgeClass(item.auditRiskLevel)}">${escapeHtml(getAuditRiskLabel(item.auditRiskLevel))}</span>` : '—'}</td>
+            <td>
+                <strong class="contract-items-table-title">${escapeHtml(marketValueLabel)}</strong>
+                ${marketRangeLabel ? `<span class="contract-items-table-subvalue">Діапазон: ${escapeHtml(marketRangeLabel)}</span>` : ''}
+            </td>
+            <td>${escapeHtml(overpricingLabel)}</td>
+            <td>${escapeHtml(typeof item?.unitPrice === 'number' ? formatAmount(item.unitPrice) : '—')}</td>
+            <td>${escapeHtml(typeof item?.totalPrice === 'number' ? formatAmount(item.totalPrice) : '—')}</td>
+            <td>${escapeHtml(formatMaybeNumber(item?.quantity))}</td>
+            <td>${escapeHtml(item?.unit || '—')}</td>
+            <td>${escapeHtml(item?.currency || '—')}</td>
+        </tr>
+    `;
+}
+
 function setStatsLoading(show) {
     els.statsBar.classList.toggle('is-loading', show);
     els.statsLoading?.setAttribute('aria-hidden', show ? 'false' : 'true');
@@ -854,6 +3097,52 @@ function formatAmount(value) {
     });
 }
 
+function formatMaybeNumber(value) {
+    if (typeof value !== 'number') {
+        return '—';
+    }
+
+    return value.toLocaleString('uk-UA', {
+        minimumFractionDigits: Number.isInteger(value) ? 0 : 2,
+        maximumFractionDigits: 2,
+    });
+}
+
+function formatPercentValue(value) {
+    if (typeof value !== 'number') {
+        return '—';
+    }
+
+    return `${value >= 0 ? '+' : ''}${formatMaybeNumber(value)}%`;
+}
+
+function formatMoneyValue(value, currency) {
+    if (typeof value !== 'number') {
+        return '—';
+    }
+
+    return `${formatAmount(value)}${currency ? ` ${currency}` : ''}`;
+}
+
+function formatUsdValue(value) {
+    if (typeof value !== 'number') {
+        return '—';
+    }
+
+    return `${value.toLocaleString('uk-UA', {
+        minimumFractionDigits: value >= 1 ? 2 : 4,
+        maximumFractionDigits: value >= 1 ? 2 : 6,
+    })} USD`;
+}
+
+function formatConfidence(value) {
+    if (typeof value !== 'number') {
+        return '—';
+    }
+
+    return `${(value * 100).toFixed(1)}%`;
+}
+
 function formatNumber(value) {
     const numeric = typeof value === 'number' ? value : Number(value || 0);
     return numeric.toLocaleString('uk-UA');
@@ -899,6 +3188,10 @@ function escapeHtml(value) {
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+}
+
+function escapeHtmlTextarea(value) {
+    return escapeHtml(value).replaceAll('`', '&#96;');
 }
 
 init();

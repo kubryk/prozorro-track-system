@@ -15,6 +15,12 @@ export const CONTRACT_PRICE_KEYWORDS = [
   'pricing',
 ] as const;
 
+export const SPECIFICATION_TITLE_HINTS = [
+  'специфікація',
+  'специфікац',
+  'specification',
+] as const;
+
 export const PRICE_HEADER_ALIASES = {
   itemName: [
     'найменування',
@@ -25,16 +31,55 @@ export const PRICE_HEADER_ALIASES = {
     'предмет',
     'item',
     'description',
+    'роботи',
+    'послуги',
   ],
-  quantity: ['кількість', 'к-ть', 'qty', 'quantity', 'обсяг'],
-  unit: ['од', 'од.', 'одиниця', 'unit', 'measure'],
+  quantity: [
+    'кількість',
+    'к-ть',
+    'кiлькiсть',
+    'кiльк',
+    'qty',
+    'quantity',
+    'обсяг',
+    'обьем',
+    'об\'єм',
+    'кільк',
+  ],
+  unit: [
+    'од',
+    'од.',
+    'одиниця',
+    'од.вим',
+    'од вим',
+    'од. вим',
+    'одиниця виміру',
+    'од. виміру',
+    'unit',
+    'measure',
+  ],
   unitPrice: [
     'ціна',
     'ціна за одиницю',
     'ціна за 1',
+    'ціна за 1 од',
+    'ціна за 1 од.',
+    'ціна одиниці',
+    'вартість за 1',
+    'вартість за одиницю',
+    'вартість одиниці',
     'unit price',
     'price per unit',
   ],
-  totalPrice: ['сума', 'вартість', 'всього', 'разом', 'total', 'amount'],
+  totalPrice: [
+    'сума',
+    'загальна вартість',
+    'всього',
+    'разом',
+    'усього',
+    'итого',
+    'total',
+    'amount',
+  ],
   vat: ['пдв', 'vat'],
 } as const;

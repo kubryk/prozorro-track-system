@@ -4,10 +4,18 @@ import { BullModule } from '@nestjs/bullmq';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ProzorroModule } from '../prozorro/prozorro.module';
 import { CONTRACT_PRICE_EXTRACTION_QUEUE } from './contract-extraction.constants';
-import { ContractExtractionController } from './contract-extraction.controller';
 import { ContractExtractionService } from './contract-extraction.service';
 import { ContractPriceExtractionProcessor } from './contract-price-extraction.processor';
-import { GoogleDocumentAiService } from './google-document-ai.service';
+import { ContractDocumentFetchService } from './contract-document-fetch.service';
+import { ContractDocumentExtractionService } from './contract-document-extraction.service';
+import { GeminiContractAuditService } from './gemini-contract-audit.service';
+import { GeminiContractAiService } from './gemini-contract-ai.service';
+import { MistralOcrService } from './mistral-ocr.service';
+import { PdfTextExtractionService } from './pdf-text-extraction.service';
+import { ContractPromptSettingsService } from './contract-prompt-settings.service';
+import { ContractPromptSettingsController } from './contract-prompt-settings.controller';
+import { ContractAnalysisController } from './contract-analysis.controller';
+import { ContractUsageController } from './contract-usage.controller';
 
 @Module({
   imports: [
@@ -18,11 +26,21 @@ import { GoogleDocumentAiService } from './google-document-ai.service';
       name: CONTRACT_PRICE_EXTRACTION_QUEUE,
     }),
   ],
-  controllers: [ContractExtractionController],
+  controllers: [
+    ContractPromptSettingsController,
+    ContractAnalysisController,
+    ContractUsageController,
+  ],
   providers: [
     ContractExtractionService,
     ContractPriceExtractionProcessor,
-    GoogleDocumentAiService,
+    ContractDocumentFetchService,
+    ContractDocumentExtractionService,
+    PdfTextExtractionService,
+    MistralOcrService,
+    ContractPromptSettingsService,
+    GeminiContractAiService,
+    GeminiContractAuditService,
   ],
 })
 export class ContractExtractionModule {}

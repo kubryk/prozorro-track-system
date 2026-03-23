@@ -3,6 +3,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { PrismaService } from '../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
+import { ProzorroService } from '../prozorro/prozorro.service';
 
 export type EdrpouRole = 'customer' | 'supplier';
 type TenderRoleFilter = EdrpouRole | EdrpouRole[];
@@ -61,6 +62,34 @@ type TenderSortOption =
     | 'dateCreatedAsc'
     | 'amountAsc'
     | 'amountDesc';
+
+type TenderSearchParams = {
+    edrpou?: string;
+    role?: TenderRoleFilter;
+    status?: string | string[];
+    dateFrom?: string;
+    dateTo?: string;
+    dateType?: string;
+    sort?: TenderSortOption;
+    priceFrom?: number;
+    priceTo?: number;
+    skip?: number;
+    take?: number;
+};
+
+type ContractSearchParams = {
+    edrpou?: string;
+    role?: ContractRoleFilter;
+    status?: string | string[];
+    dateFrom?: string;
+    dateTo?: string;
+    priceFrom?: number;
+    priceTo?: number;
+    dateType?: string;
+    sort?: ContractSortOption;
+    skip?: number;
+    take?: number;
+};
 
 function buildTenderOrderBy(
     sort: TenderSortOption | undefined,
@@ -142,8 +171,71 @@ function buildContractOrderBy(
 export class SearchService {
     constructor(
         private readonly prisma: PrismaService,
+        private readonly prozorroService: ProzorroService,
         @InjectQueue('tender-processor') private readonly tenderQueue: Queue,
     ) { }
+
+    async getTenderProfileByTenderNumber(tenderNumber: string) {
+        const normalizedTenderNumber = tenderNumber
+            .trim()
+            .replace(/[‐‑–—−]/g, '-')
+            .toUpperCase();
+
+        const tender = await this.prisma.tender.findFirst({
+            where: {
+                OR: [
+                    {
+                        tenderID: {
+                            equals: normalizedTenderNumber,
+                            mode: 'insensitive',
+                        },
+                    },
+                    {
+                        id: normalizedTenderNumber,
+                    },
+                ],
+            },
+            include: {
+                contracts: {
+                    orderBy: {
+                        dateSigned: 'desc',
+                    },
+                },
+            },
+        });
+
+        if (!tender) {
+            return null;
+        }
+
+        const tenderDetails = await this.prozorroService.getTenderDetails(tender.id);
+        const contracts = await Promise.all(
+            tender.contracts.map(async (contract) => {
+                try {
+                    const details = await this.prozorroService.getContractDetails(
+                        tender.id,
+                        contract.id,
+                    );
+
+                    return {
+                        ...contract,
+                        details,
+                    };
+                } catch {
+                    return {
+                        ...contract,
+                        details: null,
+                    };
+                }
+            }),
+        );
+
+        return {
+            tender,
+            tenderDetails,
+            contracts,
+        };
+    }
 
     /**
      * Universal tender search with filters:
@@ -153,62 +245,9 @@ export class SearchService {
      * - priceFrom / priceTo: filter by amount range
      * - skip / take: pagination
      */
-    async searchTenders(params: {
-        edrpou?: string;
-        role?: TenderRoleFilter;
-        status?: string | string[];
-        dateFrom?: string;
-        dateTo?: string;
-        dateType?: string;
-        sort?: TenderSortOption;
-        priceFrom?: number;
-        priceTo?: number;
-        skip?: number;
-        take?: number;
-    }) {
+    async searchTenders(params: TenderSearchParams) {
         const safeTake = Math.min(params.take || 20, 100);
         const skip = params.skip || 0;
-
-        const where: any = {};
-        const roles = Array.isArray(params.role)
-            ? params.role
-            : params.role
-                ? [params.role]
-                : ['customer'];
-        const statuses = Array.isArray(params.status)
-            ? params.status
-            : params.status
-                ? [params.status]
-                : [];
-
-        // EDRPOU filter based on role
-        if (params.edrpou) {
-            if (roles.length === 1 && roles[0] === 'customer') {
-                where.customerEdrpou = params.edrpou;
-            } else if (roles.length === 1 && roles[0] === 'supplier') {
-                where.contracts = {
-                    some: { supplierEdrpou: params.edrpou },
-                };
-            } else {
-                where.OR = [
-                    { customerEdrpou: params.edrpou },
-                    {
-                        contracts: {
-                            some: { supplierEdrpou: params.edrpou },
-                        },
-                    },
-                ];
-            }
-        }
-
-        // Status filter
-        if (statuses.length > 0) {
-            where.status = {
-                in: statuses,
-            };
-        }
-
-        // Date range filter
         const dateType = params.dateType || 'dateModified';
         const dateField = dateType === 'dateCreated' ? 'dateCreated' :
             dateType === 'tenderPeriodStart' ? 'tenderPeriodStart' :
@@ -218,23 +257,8 @@ export class SearchService {
                             dateType === 'auctionPeriodStart' ? 'auctionPeriodStart' :
                                 dateType === 'awardPeriodStart' ? 'awardPeriodStart' :
                                     'dateModified';
+        const where = this.buildTenderWhere(params);
         const orderBy = buildTenderOrderBy(params.sort, dateField);
-
-        const tenderDateFilter = buildDateTimeFilter(params.dateFrom, params.dateTo);
-        if (tenderDateFilter) {
-            where[dateField] = tenderDateFilter;
-        }
-
-        // Price range filter
-        if (params.priceFrom !== undefined || params.priceTo !== undefined) {
-            where.amount = {};
-            if (params.priceFrom !== undefined) {
-                where.amount.gte = params.priceFrom;
-            }
-            if (params.priceTo !== undefined) {
-                where.amount.lte = params.priceTo;
-            }
-        }
 
         const [data, total, relatedContractTotal] = await Promise.all([
             this.prisma.tender.findMany({
@@ -280,75 +304,13 @@ export class SearchService {
      * - priceFrom / priceTo: filter by amount range
      * - skip / take: pagination
      */
-    async searchContracts(params: {
-        edrpou?: string;
-        role?: ContractRoleFilter;
-        status?: string | string[];
-        dateFrom?: string;
-        dateTo?: string;
-        priceFrom?: number;
-        priceTo?: number;
-        dateType?: string;
-        sort?: ContractSortOption;
-        skip?: number;
-        take?: number;
-    }) {
+    async searchContracts(params: ContractSearchParams) {
         const safeTake = Math.min(params.take || 20, 100);
         const skip = params.skip || 0;
-
-        const where: any = {};
-        const roles = Array.isArray(params.role)
-            ? params.role
-            : params.role
-                ? [params.role]
-                : ['supplier'];
-        const statuses = Array.isArray(params.status)
-            ? params.status
-            : params.status
-                ? [params.status]
-                : [];
-
-        // EDRPOU filter based on role
-        if (params.edrpou) {
-            if (roles.length === 1 && roles[0] === 'supplier') {
-                where.supplierEdrpou = params.edrpou;
-            } else if (roles.length === 1 && roles[0] === 'customer') {
-                where.tender = { customerEdrpou: params.edrpou };
-            } else {
-                where.OR = [
-                    { supplierEdrpou: params.edrpou },
-                    { tender: { customerEdrpou: params.edrpou } },
-                ];
-            }
-        }
-
-        // Status filter
-        if (statuses.length > 0) {
-            where.status = {
-                in: statuses,
-            };
-        }
-
-        // Date range filter
         const dateType = params.dateType || 'dateSigned';
         const dateField = dateType === 'dateModified' ? 'dateModified' : 'dateSigned';
+        const where = this.buildContractWhere(params);
         const orderBy = buildContractOrderBy(params.sort, dateField);
-
-        const contractDateFilter = buildDateTimeFilter(params.dateFrom, params.dateTo);
-        if (contractDateFilter) {
-            where[dateField] = contractDateFilter;
-        }
-
-        // Price range filter
-        if (params.priceFrom !== undefined || params.priceTo !== undefined) {
-            where.amount = {};
-            if (params.priceFrom !== undefined) {
-                where.amount.gte = params.priceFrom;
-            }
-            if (params.priceTo !== undefined) {
-                where.amount.lte = params.priceTo;
-            }
-        }
 
         const [data, total, relatedTenders] = await Promise.all([
             this.prisma.contract.findMany({
@@ -386,6 +348,283 @@ export class SearchService {
             skip,
             take: safeTake,
         };
+    }
+
+    async getPortfolioAnalytics(params: {
+        edrpou: string;
+        role: ContractRoleFilter;
+        year: number;
+        priceFrom?: number;
+        tenderStatus?: string | string[];
+    }) {
+        const dateFrom = `${params.year}-01-01`;
+        const dateTo = `${params.year}-12-31`;
+        const tenderWhere = this.buildTenderWhere({
+            edrpou: params.edrpou,
+            role: params.role,
+            dateFrom,
+            dateTo,
+            dateType: 'dateCreated',
+            priceFrom: params.priceFrom,
+            status: params.tenderStatus,
+        });
+        const contractWhere = this.buildContractWhere({
+            edrpou: params.edrpou,
+            role: params.role,
+            dateFrom,
+            dateTo,
+            dateType: 'dateSigned',
+            priceFrom: params.priceFrom,
+        });
+
+        if (params.tenderStatus) {
+            const statuses = Array.isArray(params.tenderStatus)
+                ? params.tenderStatus
+                : [params.tenderStatus];
+            const tenderStatusFilter: Prisma.ContractWhereInput = {
+                tender: {
+                    status: {
+                        in: statuses,
+                    },
+                },
+            };
+
+            if (contractWhere.AND) {
+                contractWhere.AND = Array.isArray(contractWhere.AND)
+                    ? [...contractWhere.AND, tenderStatusFilter]
+                    : [contractWhere.AND, tenderStatusFilter];
+            } else {
+                contractWhere.AND = [tenderStatusFilter];
+            }
+        }
+
+        const [tenderTotal, contractTotal, contractRows] = await Promise.all([
+            this.prisma.tender.count({ where: tenderWhere }),
+            this.prisma.contract.count({ where: contractWhere }),
+            this.prisma.contract.findMany({
+                where: contractWhere,
+                select: {
+                    amount: true,
+                    currency: true,
+                    dateSigned: true,
+                    supplierName: true,
+                    supplierEdrpou: true,
+                    tender: {
+                        select: {
+                            title: true,
+                            customerName: true,
+                            customerEdrpou: true,
+                        },
+                    },
+                },
+            }),
+        ]);
+
+        const totalAmount = contractRows.reduce((sum, row) => {
+            return sum + (typeof row.amount === 'number' ? row.amount : 0);
+        }, 0);
+        const contractsWithAmount = contractRows.filter((row) => typeof row.amount === 'number');
+        const averageAmount = contractsWithAmount.length > 0
+            ? totalAmount / contractsWithAmount.length
+            : null;
+        const topCounterparties = this.buildTopCounterparties(
+            contractRows,
+            params.edrpou,
+        );
+        const currencies = Array.from(
+            new Set(
+                contractRows
+                    .map((row) => row.currency)
+                    .filter((value): value is string => Boolean(value)),
+            ),
+        );
+
+        return {
+            tenderTotal,
+            contractTotal,
+            totalAmount,
+            averageAmount,
+            currencies,
+            topCounterparties,
+        };
+    }
+
+    private buildTenderWhere(params: TenderSearchParams): Prisma.TenderWhereInput {
+        const where: Prisma.TenderWhereInput = {};
+        const roles = Array.isArray(params.role)
+            ? params.role
+            : params.role
+                ? [params.role]
+                : ['customer'];
+        const statuses = Array.isArray(params.status)
+            ? params.status
+            : params.status
+                ? [params.status]
+                : [];
+
+        if (params.edrpou) {
+            if (roles.length === 1 && roles[0] === 'customer') {
+                where.customerEdrpou = params.edrpou;
+            } else if (roles.length === 1 && roles[0] === 'supplier') {
+                where.contracts = {
+                    some: { supplierEdrpou: params.edrpou },
+                };
+            } else {
+                where.OR = [
+                    { customerEdrpou: params.edrpou },
+                    {
+                        contracts: {
+                            some: { supplierEdrpou: params.edrpou },
+                        },
+                    },
+                ];
+            }
+        }
+
+        if (statuses.length > 0) {
+            where.status = {
+                in: statuses,
+            };
+        }
+
+        const dateType = params.dateType || 'dateModified';
+        const dateField = dateType === 'dateCreated' ? 'dateCreated' :
+            dateType === 'tenderPeriodStart' ? 'tenderPeriodStart' :
+                dateType === 'tenderPeriodEnd' ? 'tenderPeriodEnd' :
+                    dateType === 'enquiryPeriodStart' ? 'enquiryPeriodStart' :
+                        dateType === 'enquiryPeriodEnd' ? 'enquiryPeriodEnd' :
+                            dateType === 'auctionPeriodStart' ? 'auctionPeriodStart' :
+                                dateType === 'awardPeriodStart' ? 'awardPeriodStart' :
+                                    'dateModified';
+        const dateFilter = buildDateTimeFilter(params.dateFrom, params.dateTo);
+        if (dateFilter) {
+            where[dateField] = dateFilter;
+        }
+
+        if (params.priceFrom !== undefined || params.priceTo !== undefined) {
+            where.amount = {};
+            if (params.priceFrom !== undefined) {
+                where.amount.gte = params.priceFrom;
+            }
+            if (params.priceTo !== undefined) {
+                where.amount.lte = params.priceTo;
+            }
+        }
+
+        return where;
+    }
+
+    private buildContractWhere(params: ContractSearchParams): Prisma.ContractWhereInput {
+        const where: Prisma.ContractWhereInput = {};
+        const roles = Array.isArray(params.role)
+            ? params.role
+            : params.role
+                ? [params.role]
+                : ['supplier'];
+        const statuses = Array.isArray(params.status)
+            ? params.status
+            : params.status
+                ? [params.status]
+                : [];
+
+        if (params.edrpou) {
+            if (roles.length === 1 && roles[0] === 'supplier') {
+                where.supplierEdrpou = params.edrpou;
+            } else if (roles.length === 1 && roles[0] === 'customer') {
+                where.tender = { customerEdrpou: params.edrpou };
+            } else {
+                where.OR = [
+                    { supplierEdrpou: params.edrpou },
+                    { tender: { customerEdrpou: params.edrpou } },
+                ];
+            }
+        }
+
+        if (statuses.length > 0) {
+            where.status = {
+                in: statuses,
+            };
+        }
+
+        const dateType = params.dateType || 'dateSigned';
+        const dateField = dateType === 'dateModified' ? 'dateModified' : 'dateSigned';
+        const dateFilter = buildDateTimeFilter(params.dateFrom, params.dateTo);
+        if (dateFilter) {
+            where[dateField] = dateFilter;
+        }
+
+        if (params.priceFrom !== undefined || params.priceTo !== undefined) {
+            where.amount = {};
+            if (params.priceFrom !== undefined) {
+                where.amount.gte = params.priceFrom;
+            }
+            if (params.priceTo !== undefined) {
+                where.amount.lte = params.priceTo;
+            }
+        }
+
+        return where;
+    }
+
+    private buildTopCounterparties(
+        contractRows: Array<{
+            amount: number | null;
+            supplierEdrpou: string | null;
+            supplierName: string | null;
+            tender: {
+                customerEdrpou: string | null;
+                customerName: string | null;
+            };
+        }>,
+        edrpou: string,
+    ) {
+        const counterpartyMap = new Map<string, { name: string; contracts: number; amount: number }>();
+
+        for (const row of contractRows) {
+            const candidates: string[] = [];
+
+            if (row.supplierEdrpou === edrpou && row.tender.customerName) {
+                candidates.push(row.tender.customerName);
+            }
+
+            if (row.tender.customerEdrpou === edrpou && row.supplierName) {
+                candidates.push(row.supplierName);
+            }
+
+            if (candidates.length === 0) {
+                if (row.supplierName) {
+                    candidates.push(row.supplierName);
+                } else if (row.tender.customerName) {
+                    candidates.push(row.tender.customerName);
+                }
+            }
+
+            for (const candidate of Array.from(new Set(candidates))) {
+                const key = candidate.trim().toLowerCase();
+                if (!key) {
+                    continue;
+                }
+
+                const existing = counterpartyMap.get(key) ?? {
+                    name: candidate.trim(),
+                    contracts: 0,
+                    amount: 0,
+                };
+                existing.contracts += 1;
+                existing.amount += typeof row.amount === 'number' ? row.amount : 0;
+                counterpartyMap.set(key, existing);
+            }
+        }
+
+        return Array.from(counterpartyMap.values())
+            .sort((left, right) => {
+                if (right.contracts !== left.contracts) {
+                    return right.contracts - left.contracts;
+                }
+
+                return right.amount - left.amount;
+            })
+            .slice(0, 5);
     }
 
     async getStats() {

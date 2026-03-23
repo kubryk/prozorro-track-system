@@ -1,11 +1,25 @@
 import { Controller, Get, Query } from '@nestjs/common';
-import { ApiQuery, ApiOperation, ApiResponse, ApiTags, ApiSecurity } from '@nestjs/swagger';
+import {
+    ApiBadRequestResponse,
+    ApiOperation,
+    ApiQuery,
+    ApiResponse,
+    ApiSecurity,
+    ApiTags,
+    ApiUnauthorizedResponse,
+} from '@nestjs/swagger';
 import { SearchService } from './search.service';
 import { SearchTendersQueryDto } from './dto/search-tenders-query.dto';
 import { SearchContractsQueryDto } from './dto/search-contracts-query.dto';
 
 @ApiTags('search')
 @ApiSecurity('api-key')
+@ApiUnauthorizedResponse({
+    description: 'Запит без валідного X-API-KEY',
+})
+@ApiBadRequestResponse({
+    description: 'Некоректні query-параметри або невалідні значення фільтрів',
+})
 @Controller('search')
 export class SearchController {
     constructor(
@@ -13,7 +27,11 @@ export class SearchController {
     ) { }
 
     @Get('tenders')
-    @ApiOperation({ summary: 'Search tenders with filters' })
+    @ApiOperation({
+        summary: 'Пошук тендерів',
+        description:
+            'Повертає список тендерів з пагінацією, загальною кількістю і агрегованою кількістю пов’язаних контрактів.',
+    })
     @ApiQuery({ name: 'edrpou', required: false, type: String, description: 'Entity identifier (8 or 10 digits)' })
     @ApiQuery({ name: 'role', required: false, type: String, description: 'Role of identifier. Supports comma-separated values like customer,supplier. Default: customer' })
     @ApiQuery({ name: 'status', required: false, type: String, description: 'Tender status. Supports comma-separated values like active,complete' })
@@ -25,7 +43,10 @@ export class SearchController {
     @ApiQuery({ name: 'sort', required: false, enum: ['default', 'dateCreatedDesc', 'dateCreatedAsc', 'amountAsc', 'amountDesc'], description: 'Sort tenders by default order, publication date, or amount' })
     @ApiQuery({ name: 'skip', required: false, type: Number, description: 'Number of items to skip (default: 0)' })
     @ApiQuery({ name: 'take', required: false, type: Number, description: 'Number of items to take (default: 20, max: 100)' })
-    @ApiResponse({ status: 200, description: 'List of matching tenders with total count' })
+    @ApiResponse({
+        status: 200,
+        description: 'Список тендерів, total, skip, take і relatedContractTotal',
+    })
     async searchTenders(
         @Query() query: SearchTendersQueryDto,
     ) {
@@ -33,7 +54,11 @@ export class SearchController {
     }
 
     @Get('contracts')
-    @ApiOperation({ summary: 'Search contracts with filters' })
+    @ApiOperation({
+        summary: 'Пошук контрактів',
+        description:
+            'Повертає список контрактів з пагінацією, загальною кількістю і кількістю пов’язаних тендерів.',
+    })
     @ApiQuery({ name: 'edrpou', required: false, type: String, description: 'Entity identifier (8 or 10 digits)' })
     @ApiQuery({ name: 'role', required: false, type: String, description: 'Role of identifier. Supports comma-separated values like supplier,customer. Default: supplier' })
     @ApiQuery({ name: 'status', required: false, type: String, description: 'Contract status. Supports comma-separated values like active,terminated' })
@@ -45,7 +70,10 @@ export class SearchController {
     @ApiQuery({ name: 'sort', required: false, enum: ['default', 'amountAsc', 'amountDesc', 'dateSignedDesc', 'dateSignedAsc'], description: 'Sort contracts by default order, amount, or signed date' })
     @ApiQuery({ name: 'skip', required: false, type: Number, description: 'Number of items to skip (default: 0)' })
     @ApiQuery({ name: 'take', required: false, type: Number, description: 'Number of items to take (default: 20, max: 100)' })
-    @ApiResponse({ status: 200, description: 'List of matching contracts with total count' })
+    @ApiResponse({
+        status: 200,
+        description: 'Список контрактів, total, skip, take і relatedTenderTotal',
+    })
     async searchContracts(
         @Query() query: SearchContractsQueryDto,
     ) {
@@ -54,8 +82,15 @@ export class SearchController {
 
 
     @Get('stats')
-    @ApiOperation({ summary: 'Get total stats for tenders and contracts' })
-    @ApiResponse({ status: 200, description: 'Total counts' })
+    @ApiOperation({
+        summary: 'Загальна статистика системи',
+        description:
+            'Повертає агреговану кількість тендерів і контрактів для верхньої панелі статистики.',
+    })
+    @ApiResponse({
+        status: 200,
+        description: 'Загальна кількість тендерів і контрактів',
+    })
     async getStats() {
         return this.searchService.getStats();
     }

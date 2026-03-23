@@ -1,5 +1,10 @@
 import {
   buildExtractedPriceLines,
+  buildExtractedPriceTablesFromArrays,
+  extractTextAfterSpecification,
+  hasPriceExtractionSignal,
+  isUsableExtractedText,
+  parseMarkdownTables,
   selectRelevantContractDocuments,
 } from './contract-extraction.utils';
 
@@ -24,6 +29,41 @@ describe('contract extraction utils', () => {
         mimeType: 'application/pdf',
       }),
     ]);
+  });
+
+  it('віддає пріоритет документам зі словом "Специфікація" в назві', () => {
+    const documents = [
+      {
+        title: 'Додаток 2 до договору',
+        url: 'https://example.com/appendix.pdf',
+        format: 'application/pdf',
+      },
+      {
+        title: 'Специфікація до договору',
+        url: 'https://example.com/spec.pdf',
+        format: 'application/pdf',
+      },
+      {
+        title: 'Локальний кошторис',
+        url: 'https://example.com/estimate.pdf',
+        format: 'application/pdf',
+      },
+    ];
+
+    const candidates = selectRelevantContractDocuments(documents);
+
+    expect(candidates[0]).toMatchObject({
+      title: 'Специфікація до договору',
+      mimeType: 'application/pdf',
+    });
+    expect(candidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: 'Додаток 2 до договору',
+          mimeType: 'application/pdf',
+        }),
+      ]),
+    );
   });
 
   it('нормалізує рядки цінової таблиці за заголовками', () => {
@@ -86,5 +126,136 @@ describe('contract extraction utils', () => {
         normalized: null,
       },
     ]);
+  });
+
+  it('евристично знаходить кількість, одиницю, ціну і суму навіть з нейтральними заголовками', () => {
+    const lines = buildExtractedPriceLines(
+      ['Колонка 1', 'Колонка 2', 'Колонка 3', 'Колонка 4', 'Колонка 5'],
+      [['Фарба для підлоги', '12', 'л', '180,00', '2160,00']],
+    );
+
+    expect(lines).toMatchObject([
+      {
+        normalized: {
+          itemName: 'Фарба для підлоги',
+          quantity: 12,
+          unit: 'л',
+          unitPrice: 180,
+          totalPrice: 2160,
+        },
+      },
+    ]);
+  });
+
+  it('бачить валюту і кількість по позиціях із заголовків таблиці', () => {
+    const lines = buildExtractedPriceLines(
+      [
+        'Найменування робіт',
+        'Од. виміру',
+        'Обсяг',
+        'Вартість за 1 од., грн',
+        'Загальна вартість, грн',
+      ],
+      [['Миття вікон', 'м2', '48', '95,50', '4584,00']],
+    );
+
+    expect(lines).toMatchObject([
+      {
+        normalized: {
+          itemName: 'Миття вікон',
+          quantity: 48,
+          unit: 'м2',
+          unitPrice: 95.5,
+          totalPrice: 4584,
+          currency: 'UAH',
+        },
+      },
+    ]);
+  });
+
+  it('парсить markdown-таблиці після OCR fallback', () => {
+    const tables = parseMarkdownTables(`
+| Найменування | Кількість | Од. | Ціна | Сума |
+| --- | ---: | --- | ---: | ---: |
+| Мило рідке | 25 | л | 82,50 | 2062,50 |
+    `);
+
+    expect(tables).toEqual([
+      [
+        ['Найменування', 'Кількість', 'Од.', 'Ціна', 'Сума'],
+        ['Мило рідке', '25', 'л', '82,50', '2062,50'],
+      ],
+    ]);
+  });
+
+  it('будує цінові таблиці з уже розпізнаних row arrays', () => {
+    const tables = buildExtractedPriceTablesFromArrays(4, [
+      [
+        ['Найменування', 'Кількість', 'Од.', 'Ціна', 'Сума'],
+        ['Мило рідке', '25', 'л', '82,50', '2062,50'],
+      ],
+    ]);
+
+    expect(tables).toMatchObject([
+      {
+        page: 4,
+        headers: ['Найменування', 'Кількість', 'Од.', 'Ціна', 'Сума'],
+        lines: [
+          {
+            normalized: {
+              itemName: 'Мило рідке',
+              quantity: 25,
+              unit: 'л',
+              unitPrice: 82.5,
+              totalPrice: 2062.5,
+            },
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('вважає текст придатним лише коли там справді є змістовний PDF text layer', () => {
+    expect(isUsableExtractedText('   ')).toBe(false);
+    expect(isUsableExtractedText('12 34 56 78')).toBe(false);
+    expect(
+      isUsableExtractedText(
+        'Специфікація до договору поставки мийних засобів. Найменування товару, кількість, одиниця виміру, ціна та загальна сума.',
+      ),
+    ).toBe(true);
+  });
+
+  it('бачить ціновий сигнал у текстовому PDF без OCR, якщо є табличні поля', () => {
+    expect(
+      hasPriceExtractionSignal(
+        'Специфікація. Найменування товару, кількість, одиниця виміру, ціна за одиницю, сума.',
+        [],
+      ),
+    ).toBe(true);
+  });
+
+  it('не вважає звичайний договірний текст ціновим сигналом', () => {
+    expect(
+      hasPriceExtractionSignal(
+        'Сторони погодили умови поставки товару, порядок розрахунків та відповідальність сторін.',
+        [],
+      ),
+    ).toBe(false);
+  });
+
+  it('бере тільки текст після слова "Специфікація", якщо воно є в документі', () => {
+    expect(
+      extractTextAfterSpecification(
+        'Договір поставки\nУмови оплати та відповідальність сторін.\nСпецифікація:\nНайменування товару\nБензин А-95',
+      ),
+    ).toBe('Найменування товару\nБензин А-95');
+  });
+
+  it('залишає весь текст, якщо слова "Специфікація" в документі немає', () => {
+    expect(
+      extractTextAfterSpecification(
+        'Найменування товару\nКількість\nЦіна за одиницю',
+      ),
+    ).toBe('Найменування товару\nКількість\nЦіна за одиницю');
   });
 });

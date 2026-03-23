@@ -8,6 +8,7 @@ import {
   ContractDocumentCandidate,
   ExtractedPriceTable,
 } from './contract-extraction.types';
+import { SPECIFICATION_TITLE_HINTS } from './contract-extraction.constants';
 import { buildExtractedPriceLines } from './contract-extraction.utils';
 
 interface ServiceAccountCredentials {
@@ -52,10 +53,18 @@ export class GoogleDocumentAiService {
       this.getFormProcessorId(),
       candidatePages,
     );
+    const tables = this.extractTables(processedDocument);
+    const confirmedPages = new Set(tables.map((table) => table.page));
+    const filteredCandidatePages = Array.isArray(candidatePages)
+      ? candidatePages.filter((page) => confirmedPages.has(page))
+      : null;
 
     return {
-      candidatePages,
-      tables: this.extractTables(processedDocument),
+      candidatePages:
+        filteredCandidatePages && filteredCandidatePages.length > 0
+          ? filteredCandidatePages
+          : null,
+      tables,
     };
   }
 
@@ -85,16 +94,41 @@ export class GoogleDocumentAiService {
     const pages = Array.isArray(layoutDocument?.pages)
       ? layoutDocument.pages
       : [];
+    const fullText = typeof layoutDocument?.text === 'string' ? layoutDocument.text : '';
 
     const pagesWithTables = pages
-      .filter(
-        (page: any) => Array.isArray(page?.tables) && page.tables.length > 0,
-      )
-      .map((page: any) => Number(page.pageNumber))
+      .map((page: any) => ({
+        pageNumber: Number(page?.pageNumber),
+        hasTables: Array.isArray(page?.tables) && page.tables.length > 0,
+        pageText: this.extractLayoutText(fullText, page?.layout).toLowerCase(),
+      }))
+      .filter((page: any) => page.hasTables)
+      .map((page: any) => page.pageNumber)
       .filter(
         (pageNumber: number) =>
           Number.isFinite(pageNumber) && pageNumber > 0,
       );
+
+    const specificationPagesWithTables = pages
+      .map((page: any) => ({
+        pageNumber: Number(page?.pageNumber),
+        hasTables: Array.isArray(page?.tables) && page.tables.length > 0,
+        pageText: this.extractLayoutText(fullText, page?.layout).toLowerCase(),
+      }))
+      .filter(
+        (page: any) =>
+          page.hasTables &&
+          SPECIFICATION_TITLE_HINTS.some((hint) => page.pageText.includes(hint)),
+      )
+      .map((page: any) => page.pageNumber)
+      .filter(
+        (pageNumber: number) =>
+          Number.isFinite(pageNumber) && pageNumber > 0,
+      );
+
+    if (specificationPagesWithTables.length > 0) {
+      return specificationPagesWithTables;
+    }
 
     return pagesWithTables.length > 0 ? pagesWithTables : null;
   }
@@ -196,6 +230,7 @@ export class GoogleDocumentAiService {
             ? row.cells.map((cell: any) => this.extractLayoutText(text, cell?.layout))
             : [],
         );
+        const lines = buildExtractedPriceLines(headers, rows);
 
         tables.push({
           page: pageNumber,
@@ -204,7 +239,7 @@ export class GoogleDocumentAiService {
             typeof table?.layout?.confidence === 'number'
               ? table.layout.confidence
               : null,
-          lines: buildExtractedPriceLines(headers, rows),
+          lines,
         });
       }
     }
@@ -217,10 +252,24 @@ export class GoogleDocumentAiService {
       return [];
     }
 
-    const lastHeaderRow = headerRows[headerRows.length - 1];
-    const cells = Array.isArray(lastHeaderRow?.cells) ? lastHeaderRow.cells : [];
+    const headerMatrix = headerRows.map((row: any) =>
+      Array.isArray(row?.cells)
+        ? row.cells.map((cell: any) => this.extractLayoutText(fullText, cell?.layout))
+        : [],
+    );
+    const maxColumns = headerMatrix.reduce(
+      (max, row) => Math.max(max, row.length),
+      0,
+    );
 
-    return cells.map((cell: any) => this.extractLayoutText(fullText, cell?.layout));
+    return Array.from({ length: maxColumns }, (_, columnIndex) => {
+      const fragments = headerMatrix
+        .map((row) => row[columnIndex] || '')
+        .filter((value) => value.trim().length > 0);
+      const uniqueFragments = [...new Set(fragments)];
+
+      return uniqueFragments.join(' ').replace(/\s+/g, ' ').trim();
+    });
   }
 
   private extractLayoutText(fullText: string, layout: any): string {
