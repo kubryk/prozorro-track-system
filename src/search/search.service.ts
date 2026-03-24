@@ -157,6 +157,7 @@ export class SearchService {
         edrpou?: string;
         role?: TenderRoleFilter;
         status?: string | string[];
+        year?: number;
         dateFrom?: string;
         dateTo?: string;
         dateType?: string;
@@ -169,7 +170,7 @@ export class SearchService {
         const safeTake = Math.min(params.take || 20, 100);
         const skip = params.skip || 0;
 
-        const where: any = {};
+        const where: Prisma.TenderWhereInput = {};
         const roles = Array.isArray(params.role)
             ? params.role
             : params.role
@@ -208,32 +209,35 @@ export class SearchService {
             };
         }
 
+        // Year filter
+        if (params.year !== undefined) {
+            where.year = params.year;
+        }
+
         // Date range filter
-        const dateType = params.dateType || 'dateModified';
-        const dateField = dateType === 'dateCreated' ? 'dateCreated' :
-            dateType === 'tenderPeriodStart' ? 'tenderPeriodStart' :
-                dateType === 'tenderPeriodEnd' ? 'tenderPeriodEnd' :
-                    dateType === 'enquiryPeriodStart' ? 'enquiryPeriodStart' :
-                        dateType === 'enquiryPeriodEnd' ? 'enquiryPeriodEnd' :
-                            dateType === 'auctionPeriodStart' ? 'auctionPeriodStart' :
-                                dateType === 'awardPeriodStart' ? 'awardPeriodStart' :
-                                    'dateModified';
+        const tenderDateFieldMap: Record<string, keyof Pick<Prisma.TenderOrderByWithRelationInput, 'dateModified' | 'dateCreated' | 'tenderPeriodStart' | 'tenderPeriodEnd' | 'enquiryPeriodStart' | 'enquiryPeriodEnd' | 'auctionPeriodStart' | 'awardPeriodStart'>> = {
+            dateCreated: 'dateCreated',
+            tenderPeriodStart: 'tenderPeriodStart',
+            tenderPeriodEnd: 'tenderPeriodEnd',
+            enquiryPeriodStart: 'enquiryPeriodStart',
+            enquiryPeriodEnd: 'enquiryPeriodEnd',
+            auctionPeriodStart: 'auctionPeriodStart',
+            awardPeriodStart: 'awardPeriodStart',
+        };
+        const dateField = tenderDateFieldMap[params.dateType ?? ''] ?? 'dateModified';
         const orderBy = buildTenderOrderBy(params.sort, dateField);
 
         const tenderDateFilter = buildDateTimeFilter(params.dateFrom, params.dateTo);
         if (tenderDateFilter) {
-            where[dateField] = tenderDateFilter;
+            Object.assign(where, { [dateField]: tenderDateFilter });
         }
 
         // Price range filter
         if (params.priceFrom !== undefined || params.priceTo !== undefined) {
-            where.amount = {};
-            if (params.priceFrom !== undefined) {
-                where.amount.gte = params.priceFrom;
-            }
-            if (params.priceTo !== undefined) {
-                where.amount.lte = params.priceTo;
-            }
+            where.amount = {
+                ...(params.priceFrom !== undefined && { gte: params.priceFrom }),
+                ...(params.priceTo !== undefined && { lte: params.priceTo }),
+            };
         }
 
         const [data, total, relatedContractTotal] = await Promise.all([
@@ -296,7 +300,7 @@ export class SearchService {
         const safeTake = Math.min(params.take || 20, 100);
         const skip = params.skip || 0;
 
-        const where: any = {};
+        const where: Prisma.ContractWhereInput = {};
         const roles = Array.isArray(params.role)
             ? params.role
             : params.role
@@ -330,8 +334,8 @@ export class SearchService {
         }
 
         // Date range filter
-        const dateType = params.dateType || 'dateSigned';
-        const dateField = dateType === 'dateModified' ? 'dateModified' : 'dateSigned';
+        const dateField: 'dateModified' | 'dateSigned' =
+            params.dateType === 'dateModified' ? 'dateModified' : 'dateSigned';
         const orderBy = buildContractOrderBy(params.sort, dateField);
 
         const contractDateFilter = buildDateTimeFilter(params.dateFrom, params.dateTo);
@@ -341,16 +345,13 @@ export class SearchService {
 
         // Price range filter
         if (params.priceFrom !== undefined || params.priceTo !== undefined) {
-            where.amount = {};
-            if (params.priceFrom !== undefined) {
-                where.amount.gte = params.priceFrom;
-            }
-            if (params.priceTo !== undefined) {
-                where.amount.lte = params.priceTo;
-            }
+            where.amount = {
+                ...(params.priceFrom !== undefined && { gte: params.priceFrom }),
+                ...(params.priceTo !== undefined && { lte: params.priceTo }),
+            };
         }
 
-        const [data, total, relatedTenders] = await Promise.all([
+        const [data, total, relatedTenderGroups] = await Promise.all([
             this.prisma.contract.findMany({
                 where,
                 skip,
@@ -370,19 +371,17 @@ export class SearchService {
                 },
             }),
             this.prisma.contract.count({ where }),
-            this.prisma.contract.findMany({
+            this.prisma.contract.groupBy({
+                by: ['tenderId'],
                 where,
-                distinct: ['tenderId'],
-                select: {
-                    tenderId: true,
-                },
+                _count: true,
             }),
         ]);
 
         return {
             data,
             total,
-            relatedTenderTotal: relatedTenders.length,
+            relatedTenderTotal: relatedTenderGroups.length,
             skip,
             take: safeTake,
         };
@@ -392,9 +391,7 @@ export class SearchService {
         const [tenderCount, contractCount, syncState, incompleteTenderCount, queueCounts] = await Promise.all([
             this.prisma.tender.count(),
             this.prisma.contract.count(),
-            this.prisma.syncState.findFirst({
-                orderBy: { updatedAt: 'desc' }
-            }),
+            this.prisma.syncState.findUnique({ where: { id: 1 } }),
             this.prisma.tender.count({
                 where: { syncStatus: { in: ['PARTIAL', 'FAILED'] } },
             }),

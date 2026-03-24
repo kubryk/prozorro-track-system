@@ -17,6 +17,7 @@ export class SearchController {
     @ApiQuery({ name: 'edrpou', required: false, type: String, description: 'Entity identifier (8 or 10 digits)' })
     @ApiQuery({ name: 'role', required: false, type: String, description: 'Role of identifier. Supports comma-separated values like customer,supplier. Default: customer' })
     @ApiQuery({ name: 'status', required: false, type: String, description: 'Tender status. Supports comma-separated values like active,complete' })
+    @ApiQuery({ name: 'year', required: false, type: Number, description: 'Filter by tender year (derived from dateModified), e.g. 2025' })
     @ApiQuery({ name: 'dateFrom', required: false, type: String, description: 'Filter by dateModified from (ISO format; date-only values start at 00:00:00Z, e.g. 2025-01-01)' })
     @ApiQuery({ name: 'dateTo', required: false, type: String, description: 'Filter by dateModified to (ISO format; date-only values include the full day, e.g. 2025-12-31)' })
     @ApiQuery({ name: 'priceFrom', required: false, type: Number, description: 'Minimum amount' })

@@ -120,23 +120,6 @@ export class TenderProcessor extends WorkerHost {
         throw new Error(`No details found for tender: ${tenderId}`);
       }
 
-      // Collect Suppliers (from bids)
-      const suppliers = new Map<string, string>(); // EDRPOU -> Name
-      if (tenderDetails.bids) {
-        for (const bid of tenderDetails.bids) {
-          if (bid.tenderers) {
-            for (const tenderer of bid.tenderers) {
-              if (tenderer.identifier && tenderer.identifier.id) {
-                suppliers.set(
-                  tenderer.identifier.id,
-                  tenderer.name || tenderer.identifier.legalName || null,
-                );
-              }
-            }
-          }
-        }
-      }
-
       // Extract Customer (from procuringEntity)
       let customerEdrpou: string | null = null;
       let customerName: string | null = null;
@@ -341,7 +324,6 @@ export class TenderProcessor extends WorkerHost {
       return {
         success: true,
         customers: customerEdrpou ? 1 : 0,
-        suppliers: suppliers.size,
         contracts: contractsCount,
       };
     } catch (error) {

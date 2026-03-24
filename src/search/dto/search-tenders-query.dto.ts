@@ -54,6 +54,13 @@ export class SearchTendersQueryDto {
   status?: string[];
 
   @IsOptional()
+  @Transform(toOptionalNumber)
+  @IsInt()
+  @Min(2000)
+  @Max(2100)
+  year?: number;
+
+  @IsOptional()
   @IsDateString()
   dateFrom?: string;
 

@@ -29,7 +29,7 @@ model Tender {
   auctionPeriodStart   DateTime?
   awardPeriodStart     DateTime?
 
-  syncStatus       String        @default("FULL") // "FULL" or "PARTIAL"
+  syncStatus       String        @default("FULL") // "FULL", "PARTIAL", or "FAILED"
   
   customerEdrpou   String?
   customerName     String?
